@@ -1,0 +1,2 @@
+# Auto
+AutoClick and AutoPaste
