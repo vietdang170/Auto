@@ -1,0 +1,16 @@
+# File tạo ra khi build
+*.exe
+*.exe.bak
+*.exe.old
+*.exe.new
+*.exe.failed
+obj/
+release/
+build.log
+
+# File tạm khi test và chẩn đoán
+tests/*.png
+startup-trace.txt
+
+# Thư mục sao lưu
+backup-before-*/
