@@ -93,7 +93,7 @@ namespace VietDang.AutoClick
     internal static class SettingsStore
     {
         private const string LegacyKey = @"Software\VietDang\AutoClick";
-        internal static string DefaultPath { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "VietDang", "Auto", "autoclick.xml"); } }
+        internal static string DefaultPath { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "VietDang", "V-TOOL", "autoclick.xml"); } }
         internal static string Serialize(AppSettings settings)
         {
             settings.Validate();

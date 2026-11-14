@@ -16,12 +16,12 @@ using System.Windows.Forms;
 using Microsoft.Win32;
 using VietDang.Design;
 
-// Updates come from GitHub Releases of vietdang170/Auto. A release is tagged vX.Y.Z and carries Auto.exe; its SHA-256
-// comes from the digest GitHub computes for uploads (or from an optional Auto.exe.sha256 file). Auto downloads the new exe in the background into its own update folder,
-// checks it, and only swaps it in when the user clicks "Tắt và cập nhật". The swap happens after Auto has
-// closed: the running exe is renamed to Auto.old.exe, the new one takes its name and is started. If the new
-// version does not report that it started properly within 30 seconds, the old exe is put back and started.
-namespace VietDang.AutoSuite
+// Updates come from GitHub Releases of vietdang170/V-TOOL. A release is tagged vX.Y.Z and carries V-TOOL.exe; its SHA-256
+// comes from the digest GitHub computes for uploads (or from an optional V-TOOL.exe.sha256 file). V-TOOL downloads the new
+// exe in the background into its own update folder, checks it, and only swaps it in when the user clicks "Tắt và cập nhật".
+// The swap happens after V-TOOL has closed: the running exe is kept as V-TOOL.exe.old, the new one takes its name and is
+// started. If the new version does not report that it started properly within 30 seconds, the old exe is put back and started.
+namespace VietDang.VTool
 {
     internal sealed class ReleaseInfo
     {
@@ -29,25 +29,28 @@ namespace VietDang.AutoSuite
         internal string Notes;
         internal string ExeUrl;
         internal string HashUrl;
-        internal string Hash;         // SHA-256 that GitHub computed for Auto.exe, when it provides one
+        internal string Hash;         // SHA-256 that GitHub computed for the exe, when it provides one
         internal string Downloaded;   // verified copy in the update folder, once downloaded
+        internal string Problem;      // why this release cannot be installed (no V-TOOL.exe, no checksum); null when it can
     }
 
     internal static class Updates
     {
-        internal const string Repository = "vietdang170/Auto";
-        internal const string ExeName = "Auto.exe";
-        private const string Key = @"Software\VietDang\Auto";
+        // GitHub keeps redirecting an old name if the repository is renamed again, and the update check follows the redirect.
+        internal const string Repository = "vietdang170/V-TOOL";
+        internal const string ExeName = "V-TOOL.exe";
+        private const string AssemblyIdentity = "V-TOOL";
+        private const string Key = Program.SettingsKey;
         private const int StartTimeoutMs = 30000;
 
-        // Set by the window when the user chooses to update; acted on by Main after Auto has closed.
+        // Set by the window when the user chooses to update; acted on by Main after V-TOOL has closed.
         internal static ReleaseInfo PendingInstall;
         internal static bool ReopenWindow = true;
 
         internal static Version Current { get { return Normalize(Assembly.GetExecutingAssembly().GetName().Version); } }
         internal static string Folder
         {
-            get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VietDang", "Auto", "updates"); }
+            get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VietDang", "V-TOOL", "updates"); }
         }
 
         internal static Version Normalize(Version v) { return new Version(v.Major, v.Minor, Math.Max(0, v.Build)); }
@@ -88,12 +91,12 @@ namespace VietDang.AutoSuite
         internal static bool CheckDue { get { return DateTime.UtcNow - LastCheck >= TimeSpan.FromHours(23); } }
 
         // ---- GitHub ------------------------------------------------------------------------------------
-        private static HttpWebRequest Request(string url, string accept)
+        internal static HttpWebRequest Request(string url, string accept)
         {
             // .NET Framework 4 does not enable TLS 1.2 by default; GitHub requires it.
             ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072;
             HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
-            request.UserAgent = "Auto-Updater/" + Current;
+            request.UserAgent = "V-TOOL-Updater/" + Current;
             request.Accept = accept;
             request.Timeout = 20000;
             request.ReadWriteTimeout = 30000;
@@ -116,14 +119,20 @@ namespace VietDang.AutoSuite
 
         private static ReleaseInfo FetchFromWebsite()
         {
-            string site = "https://github.com/" + Repository + "/releases/";
-            HttpWebRequest request = Request(site + "latest", "text/html");
-            request.AllowAutoRedirect = false;
-            string location;
-            using (HttpWebResponse response = (HttpWebResponse)request.GetResponse()) location = response.Headers["Location"];
+            string latest = "https://github.com/" + Repository + "/releases/latest", location = null;
             // /releases/latest redirects to /releases/tag/<tag>, or to /releases when nothing is published.
+            // A renamed repository first redirects to the new name's /releases/latest, so follow a few hops.
+            for (int hop = 0; hop < 4 && latest != null; hop++)
+            {
+                HttpWebRequest request = Request(latest, "text/html");
+                request.AllowAutoRedirect = false;
+                using (HttpWebResponse response = (HttpWebResponse)request.GetResponse()) location = response.Headers["Location"];
+                if (location != null && location.StartsWith("/")) location = "https://github.com" + location;
+                latest = location != null && location.TrimEnd('/').EndsWith("/releases/latest", StringComparison.OrdinalIgnoreCase) ? location : null;
+            }
             int at = location == null ? -1 : location.IndexOf("/releases/tag/", StringComparison.OrdinalIgnoreCase);
             if (at < 0) return null;
+            string site = location.Substring(0, at) + "/releases/";
             string tag = Uri.UnescapeDataString(location.Substring(at + 14).Split('?', '#')[0]);
             ReleaseInfo info = new ReleaseInfo { Version = ParseTag(tag), Notes = "Xem ghi chú tại " + site + "tag/" + tag };
             if (info.Version == null) throw new InvalidDataException("Tên phiên bản trên GitHub không đúng dạng vX.Y.Z.");
@@ -132,17 +141,20 @@ namespace VietDang.AutoSuite
             using (StreamReader reader = new StreamReader(response.GetResponseStream(), Encoding.UTF8))
                 html = reader.ReadToEnd();
             if (html.IndexOf("/releases/download/" + tag + "/" + ExeName + "\"", StringComparison.OrdinalIgnoreCase) < 0)
-                throw new InvalidDataException("Bản phát hành " + info.Version + " chưa có file Auto.exe.");
+            {
+                info.Problem = "Bản phát hành " + info.Version + " chưa có file " + ExeName + ".";
+                return info;
+            }
             info.ExeUrl = site + "download/" + tag + "/" + ExeName;
-            info.Hash = FindDigest(html);
-            if (info.Hash == null) info.HashUrl = site + "download/" + tag + "/" + ExeName + ".sha256";
+            info.Hash = FindDigest(html, ExeName);
+            if (info.Hash == null) info.HashUrl = info.ExeUrl + ".sha256";
             return info;
         }
 
-        // The asset list on the release page shows "sha256:<hex>" under each file; take the one that follows Auto.exe.
-        internal static string FindDigest(string html)
+        // The asset list on the release page shows "sha256:<hex>" under each file; take the one that follows the exe.
+        internal static string FindDigest(string html, string asset)
         {
-            Match match = Regex.Match(html ?? "", "/releases/download/[^\"]*/" + Regex.Escape(ExeName) + "\"[\\s\\S]*?sha256:([0-9a-fA-F]{64})");
+            Match match = Regex.Match(html ?? "", "/releases/download/[^\"]*/" + Regex.Escape(asset) + "\"[\\s\\S]*?sha256:([0-9a-fA-F]{64})");
             return match.Success ? match.Groups[1].Value.ToLowerInvariant() : null;
         }
 
@@ -172,26 +184,30 @@ namespace VietDang.AutoSuite
             if ((release.TryGetValue("draft", out draft) && true.Equals(draft)) || (release.TryGetValue("prerelease", out prerelease) && true.Equals(prerelease))) return null;
             ReleaseInfo info = new ReleaseInfo { Version = ParseTag(Text(release, "tag_name")), Notes = Text(release, "body") };
             if (info.Version == null) throw new InvalidDataException("Tên phiên bản trên GitHub không đúng dạng vX.Y.Z.");
+            Dictionary<string, Dictionary<string, object>> byName = new Dictionary<string, Dictionary<string, object>>(StringComparer.OrdinalIgnoreCase);
             object assets;
             if (release.TryGetValue("assets", out assets) && assets is IEnumerable)
             {
                 foreach (object item in (IEnumerable)assets)
                 {
                     Dictionary<string, object> asset = item as Dictionary<string, object>;
-                    if (asset == null) continue;
-                    string name = Text(asset, "name"), url = Text(asset, "browser_download_url");
-                    if (string.Equals(name, ExeName, StringComparison.OrdinalIgnoreCase))
-                    {
-                        info.ExeUrl = url;
-                        // GitHub computes a "sha256:<hex>" digest for every uploaded file.
-                        string digest = Text(asset, "digest");
-                        if (digest != null && digest.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase)) info.Hash = ParseHash(digest.Substring(7));
-                    }
-                    else if (string.Equals(name, ExeName + ".sha256", StringComparison.OrdinalIgnoreCase)) info.HashUrl = url;
+                    string name = asset == null ? null : Text(asset, "name");
+                    if (name != null) byName[name] = asset;
                 }
             }
-            if (info.ExeUrl == null) throw new InvalidDataException("Bản phát hành " + info.Version + " chưa có file Auto.exe.");
-            if (info.Hash == null && info.HashUrl == null) throw new InvalidDataException("Bản phát hành " + info.Version + " chưa có mã kiểm tra cho Auto.exe.");
+            // A release that cannot be installed is still returned, so an older one is simply "not newer" rather than an error.
+            Dictionary<string, object> exe, hashFile;
+            if (!byName.TryGetValue(ExeName, out exe))
+            {
+                info.Problem = "Bản phát hành " + info.Version + " chưa có file " + ExeName + ".";
+                return info;
+            }
+            info.ExeUrl = Text(exe, "browser_download_url");
+            // GitHub computes a "sha256:<hex>" digest for every uploaded file.
+            string digest = Text(exe, "digest");
+            if (digest != null && digest.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase)) info.Hash = ParseHash(digest.Substring(7));
+            if (byName.TryGetValue(ExeName + ".sha256", out hashFile)) info.HashUrl = Text(hashFile, "browser_download_url");
+            if (info.Hash == null && info.HashUrl == null) info.Problem = "Bản phát hành " + info.Version + " chưa có mã kiểm tra cho " + ExeName + ".";
             return info;
         }
         private static string Text(Dictionary<string, object> map, string name)
@@ -211,7 +227,7 @@ namespace VietDang.AutoSuite
             }
         }
 
-        // The .sha256 file holds the hash first, optionally followed by the file name ("<hash>  Auto.exe").
+        // The .sha256 file holds the hash first, optionally followed by the file name ("<hash>  V-TOOL.exe").
         internal static string ParseHash(string text)
         {
             if (text == null) return null;
@@ -222,14 +238,14 @@ namespace VietDang.AutoSuite
             return first.ToLowerInvariant();
         }
 
-        // A file is accepted only if its hash matches and it really is Auto at the announced version.
+        // A file is accepted only if its hash matches and it really is V-TOOL at the announced version.
         internal static bool IsValidPackage(string path, string expectedHash, Version version)
         {
             if (!File.Exists(path) || !string.Equals(Sha256(path), expectedHash, StringComparison.OrdinalIgnoreCase)) return false;
             try
             {
                 AssemblyName name = AssemblyName.GetAssemblyName(path);
-                return name.Name == "Auto" && Normalize(name.Version) == version;
+                return name.Name == AssemblyIdentity && Normalize(name.Version) == version;
             }
             catch (BadImageFormatException) { return false; }
             catch (IOException) { return false; }
@@ -239,7 +255,7 @@ namespace VietDang.AutoSuite
         internal static void Download(ReleaseInfo release)
         {
             Directory.CreateDirectory(Folder);
-            string target = Path.Combine(Folder, "Auto-" + release.Version + ".exe");
+            string target = Path.Combine(Folder, "V-TOOL-" + release.Version + ".exe");
             string hash = release.Hash;
             if (hash == null)
             {
@@ -247,7 +263,7 @@ namespace VietDang.AutoSuite
                 using (StreamReader reader = new StreamReader(response.GetResponseStream()))
                     hash = ParseHash(reader.ReadToEnd());
             }
-            if (hash == null) throw new InvalidDataException("File Auto.exe.sha256 trên GitHub không hợp lệ.");
+            if (hash == null) throw new InvalidDataException("File .sha256 trên GitHub không hợp lệ.");
             if (!IsValidPackage(target, hash, release.Version))
             {
                 string part = target + ".part";
@@ -264,7 +280,7 @@ namespace VietDang.AutoSuite
                 File.Move(part, target);
             }
             // Older downloads are no longer needed.
-            foreach (string file in Directory.GetFiles(Folder, "Auto-*.exe*"))
+            foreach (string file in Directory.GetFiles(Folder, "V-TOOL-*.exe*"))
                 if (!string.Equals(file, target, StringComparison.OrdinalIgnoreCase)) { try { File.Delete(file); } catch (IOException) { } catch (UnauthorizedAccessException) { } }
             release.Downloaded = target;
         }
@@ -282,13 +298,12 @@ namespace VietDang.AutoSuite
             }
             catch (Exception ex)
             {
-                return "Không thể ghi vào thư mục " + folder + " (" + ex.Message + "). Hãy chuyển Auto.exe sang Desktop hoặc Documents rồi thử lại.";
+                return "Không thể ghi vào thư mục " + folder + " (" + ex.Message + "). Hãy chuyển " + Path.GetFileName(Application.ExecutablePath) + " sang Desktop hoặc Documents rồi thử lại.";
             }
         }
 
         // ---- swapping the exe ------------------------------------------------------------------------------
-        // Puts the new exe in place of the current one and keeps the current one as Auto.old.exe.
-        // The temporary and backup copies are named after the running exe itself (Auto.exe.new, Auto.exe.old), so they
+        // The temporary and backup copies are named after the running exe itself (V-TOOL.exe.new, V-TOOL.exe.old), so they
         // can never be the file that is running, whatever name the exe has. They are not .exe files, so nobody opens them by mistake.
         internal static string StagedPath(string exe) { return exe + ".new"; }
         internal static string BackupPath(string exe) { return exe + ".old"; }
@@ -328,14 +343,8 @@ namespace VietDang.AutoSuite
             catch (IOException) { return false; }
             catch (UnauthorizedAccessException) { return false; }
         }
-        // Removes leftovers of an interrupted update. Version 1.0.0 named its temporary copy Auto.new.exe.
-        internal static void CleanUp()
-        {
-            string exe = Application.ExecutablePath;
-            TryDelete(StagedPath(exe));
-            string legacy = Path.Combine(Path.GetDirectoryName(exe), "Auto.new.exe");
-            if (!string.Equals(legacy, exe, StringComparison.OrdinalIgnoreCase)) TryDelete(legacy);
-        }
+        // Removes leftovers of an interrupted update.
+        internal static void CleanUp() { TryDelete(StagedPath(Application.ExecutablePath)); }
 
         // Runs from Main after the window has closed and the single-instance locks are released.
         internal static void Install(ReleaseInfo release, bool showWindow)
@@ -344,11 +353,11 @@ namespace VietDang.AutoSuite
             try { Swap(exe, release.Downloaded); }
             catch (Exception ex)
             {
-                MessageBox.Show("Chưa cập nhật được, Auto vẫn giữ phiên bản " + Current + ".\n\n" + ex.Message, "Auto", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show("Chưa cập nhật được, " + Program.AppName + " vẫn giữ phiên bản " + Current + ".\n\n" + ex.Message, Program.AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 Relaunch(exe, showWindow, null);
                 return;
             }
-            string signal = "VietDang_Auto_Updated_" + Guid.NewGuid().ToString("N");
+            string signal = "VietDang_VTOOL_Updated_" + Guid.NewGuid().ToString("N");
             using (EventWaitHandle ready = new EventWaitHandle(false, EventResetMode.ManualReset, signal))
             {
                 Process child = null;
@@ -372,8 +381,8 @@ namespace VietDang.AutoSuite
                 try { Restore(exe); }
                 catch (Exception ex)
                 {
-                    MessageBox.Show("Cập nhật lỗi và không khôi phục được tự động.\nHãy đổi tên Auto.old.exe thành Auto.exe trong thư mục:\n"
-                        + Path.GetDirectoryName(exe) + "\n\n" + ex.Message, "Auto", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    MessageBox.Show("Cập nhật lỗi và không khôi phục được tự động.\nHãy đổi tên " + Path.GetFileName(BackupPath(exe)) + " thành " + Path.GetFileName(exe) + " trong thư mục:\n"
+                        + Path.GetDirectoryName(exe) + "\n\n" + ex.Message, Program.AppName, MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return;
                 }
                 Relaunch(exe, showWindow, null, "/update-failed:" + release.Version);
@@ -389,28 +398,18 @@ namespace VietDang.AutoSuite
             return Process.Start(new ProcessStartInfo(exe, args.ToString().Trim()) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(exe) });
         }
 
-        // Called by the new version once its window is up: tells the old process all went well, then removes Auto.old.exe.
+        // Called by the new version once its window is up: tells the old process all went well, then removes the backup.
         internal static void ReportStarted(string signal)
         {
             if (string.IsNullOrEmpty(signal)) return;
             try { using (EventWaitHandle ready = EventWaitHandle.OpenExisting(signal)) ready.Set(); }
             catch (Exception) { }
             FailedVersion = "";
-            string exe = Application.ExecutablePath;
-            // Version 1.0.0 kept its backup as Auto.old.exe; later versions use Auto.exe.old.
-            string legacy = Path.Combine(Path.GetDirectoryName(exe), "Auto.old.exe");
-            List<string> backups = new List<string> { BackupPath(exe) };
-            if (!string.Equals(legacy, exe, StringComparison.OrdinalIgnoreCase)) backups.Add(legacy);
+            string backup = BackupPath(Application.ExecutablePath);
             ThreadPool.QueueUserWorkItem(delegate
             {
                 // The old process is still exiting for a moment; retry for up to ten seconds.
-                for (int i = 0; i < 20; i++)
-                {
-                    bool done = true;
-                    foreach (string backup in backups) done &= TryDelete(backup);
-                    if (done) break;
-                    Thread.Sleep(500);
-                }
+                for (int i = 0; i < 20 && !TryDelete(backup); i++) Thread.Sleep(500);
             });
         }
     }
@@ -420,7 +419,7 @@ namespace VietDang.AutoSuite
     {
         internal UpdateDialog(ReleaseInfo release)
         {
-            Text = "Cập nhật Auto";
+            Text = "Cập nhật " + Program.AppName;
             AutoScaleDimensions = new SizeF(96, 96); AutoScaleMode = AutoScaleMode.Dpi;
             ClientSize = new Size(420, 136);
             StartPosition = FormStartPosition.CenterScreen;

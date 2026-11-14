@@ -849,7 +849,7 @@ namespace AutoPasteValueApp
         }
 
         // Apps with a button on the taskbar: visible, unowned top-level windows that are not tool windows and not
-        // cloaked (hidden Store apps and background hosts are cloaked). Auto itself is left out.
+        // cloaked (hidden Store apps and background hosts are cloaked). V-TOOL itself is left out.
         private List<KeyValuePair<string, string>> GetTaskbarApps()
         {
             List<KeyValuePair<string, string>> apps = new List<KeyValuePair<string, string>>();
@@ -1261,7 +1261,7 @@ namespace AutoPasteValueApp
             root.Controls.Add(exclude, 0, 2);
             root.SetColumnSpan(exclude, 2);
 
-            // Window-only row: the integrated Auto app has its own tray menu and Settings page.
+            // Window-only row: the integrated V-TOOL app has its own tray menu and Settings page.
             TableLayoutPanel bottom = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 1, Margin = new Padding(0, 10, 0, 0), Visible = !_embedded };
             bottom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));

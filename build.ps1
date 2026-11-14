@@ -2,9 +2,9 @@ param([switch]$Test)
 $ErrorActionPreference = 'Stop'
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 if (-not (Test-Path -LiteralPath $compiler)) { $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\csc.exe' }
-# Everything Auto needs lives in this folder: Auto.cs here, the shared modules in src.
+# Everything V-TOOL needs lives in this folder: V-TOOL.cs and Update.cs here, the modules in src.
 $src = Join-Path $PSScriptRoot 'src'
-$sources = @((Join-Path $PSScriptRoot 'Auto.cs'), (Join-Path $PSScriptRoot 'Update.cs'), (Join-Path $src 'AutoPasteValue.cs'), (Join-Path $src 'Core.cs'), (Join-Path $src 'AutoClick.cs'), (Join-Path $src 'Design.cs'))
+$sources = @((Join-Path $PSScriptRoot 'V-TOOL.cs'), (Join-Path $PSScriptRoot 'Update.cs'), (Join-Path $src 'AutoPasteValue.cs'), (Join-Path $src 'Core.cs'), (Join-Path $src 'AutoClick.cs'), (Join-Path $src 'Design.cs'), (Join-Path $src 'OfficeAddins.cs'))
 
 # The version number lives only in version.txt (for example 1.1.0); release.ps1 changes it when publishing.
 $version = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'version.txt') -Raw).Trim()
@@ -19,15 +19,17 @@ Set-Content -LiteralPath $versionSource -Encoding UTF8 -Value @(
     "[assembly: AssemblyFileVersion(""$version.0"")]",
     "[assembly: AssemblyInformationalVersion(""$version"")]")
 $sources += $versionSource
-$references = @('/reference:System.Windows.Forms.dll', '/reference:System.Drawing.dll', '/reference:System.Xml.dll', '/reference:System.Web.Extensions.dll')
-$icon = Join-Path $PSScriptRoot 'Auto.ico'
+$references = @('/reference:System.Windows.Forms.dll', '/reference:System.Drawing.dll', '/reference:System.Xml.dll', '/reference:System.Web.Extensions.dll', '/reference:System.IO.Compression.dll')
+# The donation QR code (donate-qr.png) is built into the exe.
+$resources = @("/resource:$(Join-Path $PSScriptRoot 'donate-qr.png'),VTool.DonateQr.png")
+$icon = Join-Path $PSScriptRoot 'V-TOOL.ico'
 $manifest = Join-Path $PSScriptRoot 'app.manifest'
-& $compiler /nologo /target:winexe /main:VietDang.AutoSuite.Program /optimize+ /define:TRACE /warnaserror+ "/out:$(Join-Path $PSScriptRoot 'Auto.exe')" "/win32icon:$icon" "/win32manifest:$manifest" $references $sources
-if ($LASTEXITCODE -ne 0) { throw 'Auto build failed. Close Auto before rebuilding.' }
+& $compiler /nologo /target:winexe /main:VietDang.VTool.Program /optimize+ /define:TRACE /warnaserror+ "/out:$(Join-Path $PSScriptRoot 'V-TOOL.exe')" "/win32icon:$icon" "/win32manifest:$manifest" $references $resources $sources
+if ($LASTEXITCODE -ne 0) { throw 'V-TOOL build failed. Close V-TOOL before rebuilding.' }
 if ($Test) {
-    $testOutput = Join-Path $PSScriptRoot 'tests\Auto.Tests.exe'
-    & $compiler /nologo /target:exe /main:VietDang.AutoSuite.IntegrationChecks /define:TRACE /warnaserror+ "/out:$testOutput" "/win32icon:$icon" "/win32manifest:$manifest" $references $sources (Join-Path $PSScriptRoot 'tests\IntegrationChecks.cs')
-    if ($LASTEXITCODE -ne 0) { throw 'Auto test build failed.' }
+    $testOutput = Join-Path $PSScriptRoot 'tests\V-TOOL.Tests.exe'
+    & $compiler /nologo /target:exe /main:VietDang.VTool.IntegrationChecks /define:TRACE /warnaserror+ "/out:$testOutput" "/win32icon:$icon" "/win32manifest:$manifest" $references $resources $sources (Join-Path $PSScriptRoot 'tests\IntegrationChecks.cs')
+    if ($LASTEXITCODE -ne 0) { throw 'V-TOOL test build failed.' }
     & $testOutput
-    if ($LASTEXITCODE -ne 0) { throw 'Auto integration checks failed.' }
+    if ($LASTEXITCODE -ne 0) { throw 'V-TOOL integration checks failed.' }
 }

@@ -169,6 +169,9 @@ namespace VietDang.Design
         internal const string Pause = "", Stop = "", Clear = "", Target = "", Checklist = "";
         internal const string Apps = "", App = "", OpenFile = "", Flash = "", Power = "";
         internal const string Sync = "", Save = "", Folder = "", Shield = "", Repeat = "";
+        // Add-in Office tab: puzzle piece, document (Word), calculator (Excel), download.
+        internal const string Puzzle = "\uEA86", Word = "\uE8A5", Excel = "\uE8EF", Download = "\uE896";
+        internal const string Heart = "\uEB51";
     }
 
     internal static class Kit
@@ -191,6 +194,26 @@ namespace VietDang.Design
         {
             return new Label { Text = text, Dock = DockStyle.Fill, Margin = Padding.Empty, Font = Theme.Small, ForeColor = Theme.Muted,
                 TextAlign = ContentAlignment.BottomLeft, UseMnemonic = false };
+        }
+
+        // Text that looks like a plain label but can be selected and copied: drag to select, Ctrl+C, or right-click > Sao chép.
+        internal static TextBox CopyText(string text, Font font, Color color, Color back)
+        {
+            string lines = text.Replace("\r\n", "\n").Replace("\n", "\r\n");
+            TextBox box = new TextBox { Text = lines, ReadOnly = true, Multiline = true, WordWrap = false, ScrollBars = ScrollBars.None, BorderStyle = BorderStyle.None,
+                Font = font, ForeColor = color, BackColor = back, TabStop = false, Margin = Padding.Empty };
+            box.Height = TextRenderer.MeasureText(lines, font).Height + 2;
+            ContextMenuStrip menu = new ContextMenuStrip();
+            menu.Items.Add("Sao chép", null, delegate
+            {
+                // Nothing selected copies the whole text.
+                string copy = box.SelectionLength > 0 ? box.SelectedText : box.Text;
+                try { Clipboard.SetText(copy); } catch (System.Runtime.InteropServices.ExternalException) { }
+            });
+            menu.Items.Add("Chọn tất cả", null, delegate { box.Focus(); box.SelectAll(); });
+            box.ContextMenuStrip = menu;
+            box.Disposed += delegate { menu.Dispose(); };
+            return box;
         }
 
         internal static Label Note(string text)
@@ -216,6 +239,7 @@ namespace VietDang.Design
         private readonly List<Control> _fit = new List<Control>();
         private readonly string _glyph, _title;
         private Control _badge;
+        private Icon _titleIcon;
 
         internal Card() : this(null, null) { }
         internal Card(string glyph, string title)
@@ -227,6 +251,17 @@ namespace VietDang.Design
             Padding = title == null ? new Padding(14, 8, 14, 8) : new Padding(14, HeaderHeight + 10, 14, 12);
         }
         internal void AddHeader(Control control) { _header.Add(control); Controls.Add(control); }
+        // A program icon shown instead of the glyph (owned by the card from then on); null keeps the glyph.
+        internal Icon TitleIcon
+        {
+            get { return _titleIcon; }
+            set { if (_titleIcon != null && _titleIcon != value) _titleIcon.Dispose(); _titleIcon = value; Invalidate(); }
+        }
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && _titleIcon != null) { _titleIcon.Dispose(); _titleIcon = null; }
+            base.Dispose(disposing);
+        }
         internal void AddTitleBadge(Control control) { _badge = control; Controls.Add(control); }
         internal void FitBeforeHeader(Control control) { _fit.Add(control); }
         protected override void OnLayout(LayoutEventArgs e)
@@ -252,7 +287,12 @@ namespace VietDang.Design
             g.Clear(Theme.Behind(this));
             Theme.Box(g, ClientRectangle, 8f * Theme.Scale(g), BackColor, Theme.Border);
             if (_title == null) return;
-            TextRenderer.DrawText(g, _glyph ?? "", Theme.Icon(11f), new Rectangle(14, 0, 22, HeaderHeight), Theme.Body, Theme.Line);
+            if (_titleIcon != null)
+            {
+                int size = _titleIcon.Width;
+                g.DrawIcon(_titleIcon, new Rectangle(14 + (22 - size) / 2, (HeaderHeight - size) / 2, size, size));
+            }
+            else TextRenderer.DrawText(g, _glyph ?? "", Theme.Icon(11f), new Rectangle(14, 0, 22, HeaderHeight), Theme.Body, Theme.Line);
             TextRenderer.DrawText(g, _title, Theme.CardTitle, new Rectangle(40, 0, Math.Max(0, ClientSize.Width - 54), HeaderHeight), Theme.Text, Theme.Line | TextFormatFlags.EndEllipsis);
             using (Pen line = new Pen(Theme.Divider)) g.DrawLine(line, 1, HeaderHeight, ClientSize.Width - 2, HeaderHeight);
         }

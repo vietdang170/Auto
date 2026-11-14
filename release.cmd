@@ -1,5 +1,5 @@
 @echo off
-rem Prepares a new release: asks for the version, builds and tests Auto, creates release\vX.Y.Z.
+rem Prepares a new release: asks for the version, builds and tests V-TOOL, creates release\vX.Y.Z.
 cd /d "%~dp0"
 set /p VERSION=Nhap so phien ban moi (vi du 1.1.0): 
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0release.ps1" -Version "%VERSION%"

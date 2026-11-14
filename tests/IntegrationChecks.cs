@@ -1,12 +1,15 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.IO.Compression;
 using System.Reflection;
 using System.Windows.Forms;
+using Microsoft.Win32;
 using VietDang.AutoClick;
 
-namespace VietDang.AutoSuite
+namespace VietDang.VTool
 {
     internal static class IntegrationChecks
     {
@@ -14,7 +17,7 @@ namespace VietDang.AutoSuite
         private static int _checks;
         private static object Field(object instance, string name) { return instance.GetType().GetField(name, Private).GetValue(instance); }
         private static void Check(bool condition, string message) { if (!condition) throw new Exception("FAIL: " + message); _checks++; }
-        private static void ExitFromTray(AutoForm form)
+        private static void ExitFromTray(MainWindow form)
         {
             ContextMenuStrip menu = (ContextMenuStrip)Field(form, "_menu");
             menu.Items[menu.Items.Count - 1].PerformClick();
@@ -27,8 +30,8 @@ namespace VietDang.AutoSuite
             {
                 if (args.Length == 2 && args[0] == "--tray-exit")
                 {
-                    // Isolated: no registry, global hotkeys or clipboard access, so a running Auto is never disturbed.
-                    using (AutoForm form = new AutoForm(null, args[1], true))
+                    // Isolated: no registry, global hotkeys or clipboard access, so a running V-TOOL is never disturbed.
+                    using (MainWindow form = new MainWindow(null, args[1], true))
                     using (ApplicationContext context = new ApplicationContext())
                     {
                         form.StartPosition = FormStartPosition.Manual; form.ShowInTaskbar = false;
@@ -40,10 +43,102 @@ namespace VietDang.AutoSuite
                 }
                 RunChecks();
                 RunUpdateChecks();
+                RunAddinChecks();
                 Console.WriteLine("PASS: " + _checks + " integrated app checks; user settings and clipboard untouched.");
                 return 0;
             }
             catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
+        }
+        // Installs and removes both add-ins in a throw-away folder and registry key, from zips made here (no network, no real Office).
+        private static void RunAddinChecks()
+        {
+            string folder = Path.Combine(Path.GetTempPath(), "V-TOOL.AddinChecks." + Guid.NewGuid().ToString("N"));
+            const string parent = @"Software\VietDang\V-TOOL.Tests";
+            string keyPath = parent + @"\" + Guid.NewGuid().ToString("N");
+            Directory.CreateDirectory(folder);
+            RegistryKey root = Registry.CurrentUser.CreateSubKey(keyPath);
+            try
+            {
+                OfficeEnvironment env = new OfficeEnvironment(root, null, Path.Combine(folder, "AppData"));
+                OfficeAddin excel = OfficeAddin.Excel, word = OfficeAddin.Word;
+                Check(ExcelAddin.PathOf("/R \"C:\\a b\\vtool.xlam\"") == @"C:\a b\vtool.xlam" && ExcelAddin.PathOf("\"C:\\x.xlam\"") == @"C:\x.xlam", "Excel add-in entries are read with or without /R");
+
+                string zip = Path.Combine(folder, "xlam.zip"), files = Path.Combine(folder, "xlam");
+                MakeZip(zip, "xlam/vtool.xlam", "xlam/VNFastSearch.dll", "xlam/Vietnamese.dic", "xlam/setup.cmd");
+                OfficeAddin.Extract(zip, excel.Files, files);
+                Check(File.Exists(Path.Combine(files, "vtool.xlam")) && File.Exists(Path.Combine(files, "VNFastSearch.dll")) && File.Exists(Path.Combine(files, "Vietnamese.dic"))
+                    && !File.Exists(Path.Combine(files, "setup.cmd")), "only the add-in files are taken from the zip, from any subfolder");
+                string broken = Path.Combine(folder, "broken.zip");
+                MakeZip(broken, "vtool.xlam");
+                bool refused = false;
+                try { OfficeAddin.Extract(broken, excel.Files, Path.Combine(folder, "broken")); } catch (InvalidDataException) { refused = true; }
+                Check(refused, "a zip without every add-in file is refused");
+
+                // Excel already lists other add-ins, and an old read-only vtool.xlam elsewhere, ticked and unticked.
+                string excelKey = @"Software\Microsoft\Office\16.0\Excel";
+                using (RegistryKey options = root.CreateSubKey(excelKey + @"\Options"))
+                {
+                    options.SetValue("OPEN", "\"C:\\Other\\first.xlam\"");
+                    options.SetValue("OPEN1", "/R \"C:\\Old\\vtool.xlam\"");
+                    options.SetValue("OPEN2", "\"C:\\Other\\third.xlam\"");
+                }
+                using (RegistryKey manager = root.CreateSubKey(excelKey + @"\Add-in Manager")) manager.SetValue(@"C:\Old\vtool.xlam", "");
+                Check(excel.State(env) == AddinState.Missing, "Excel add-in is reported missing before install");
+                excel.InstallFrom(env, files);
+                excel.InstallFrom(env, files);
+                string installed = Path.Combine(excel.InstallFolder(env), "vtool.xlam");
+                using (RegistryKey options = root.OpenSubKey(excelKey + @"\Options"))
+                {
+                    List<string> open = ExcelAddin.ReadOpen(options);
+                    Check(open.Count == 3 && open[0] == "\"C:\\Other\\first.xlam\"" && open[1] == "\"C:\\Other\\third.xlam\"" && open[2] == "\"" + installed + "\""
+                        && options.GetValue("OPEN3") == null, "Excel install keeps other add-ins in order, numbered without gaps, and lists V-TOOL once");
+                }
+                using (RegistryKey manager = root.OpenSubKey(excelKey + @"\Add-in Manager"))
+                    Check(manager.GetValueNames().Length == 0, "the old unticked V-TOOL entry is removed");
+                using (RegistryKey trust = root.OpenSubKey(excelKey + @"\Security\Trusted Locations\LocationVTool"))
+                    Check(trust != null && (string)trust.GetValue("Path") == excel.InstallFolder(env) + "\\" && (int)trust.GetValue("AllowSubfolders") == 1, "the add-in folder becomes a trusted location");
+                Check(excel.State(env) == AddinState.Installed && File.Exists(Path.Combine(excel.InstallFolder(env), "VNFastSearch.dll")), "Excel add-in is reported installed");
+                using (RegistryKey options = root.OpenSubKey(excelKey + @"\Options", true)) options.DeleteValue("OPEN2");
+                Check(excel.State(env) == AddinState.Disabled, "an unticked add-in is reported as not switched on");
+                using (RegistryKey options = root.OpenSubKey(excelKey + @"\Options", true)) options.SetValue("OPEN2", "\"" + installed + "\"");
+                excel.Uninstall(env);
+                using (RegistryKey options = root.OpenSubKey(excelKey + @"\Options"))
+                {
+                    List<string> open = ExcelAddin.ReadOpen(options);
+                    Check(open.Count == 2 && open[1] == "\"C:\\Other\\third.xlam\"" && options.GetValue("OPEN2") == null, "Excel uninstall removes only V-TOOL from the add-in list");
+                }
+                using (RegistryKey trust = root.OpenSubKey(excelKey + @"\Security\Trusted Locations\LocationVTool"))
+                    Check(trust == null && !Directory.Exists(excel.InstallFolder(env)) && excel.State(env) == AddinState.Missing, "Excel uninstall removes the files and the trusted location");
+
+                // Word: its default Startup folder, or the one chosen in Word's options.
+                string wordZip = Path.Combine(folder, "dotm.zip"), wordFiles = Path.Combine(folder, "dotm");
+                MakeZip(wordZip, "vtool.dotm", "Vietnamese.dic", "setup.cmd");
+                OfficeAddin.Extract(wordZip, word.Files, wordFiles);
+                Check(word.InstallFolder(env) == Path.Combine(env.AppData, @"Microsoft\Word\STARTUP"), "Word uses its default Startup folder");
+                string custom = Path.Combine(folder, "My Startup");
+                using (RegistryKey options = root.CreateSubKey(@"Software\Microsoft\Office\16.0\Word\Options")) options.SetValue("STARTUP-PATH", custom + "\\");
+                Check(word.InstallFolder(env) == custom, "Word uses the Startup folder set in its options");
+                Check(word.State(env) == AddinState.Missing, "Word add-in is reported missing before install");
+                word.InstallFrom(env, wordFiles);
+                Check(word.State(env) == AddinState.Installed && File.Exists(Path.Combine(custom, "Vietnamese.dic")), "Word install copies both files into Startup");
+                word.Uninstall(env);
+                Check(word.State(env) == AddinState.Missing && !File.Exists(Path.Combine(custom, "Vietnamese.dic")), "Word uninstall removes both files");
+            }
+            finally
+            {
+                root.Close();
+                Registry.CurrentUser.DeleteSubKeyTree(keyPath, false);
+                using (RegistryKey tests = Registry.CurrentUser.OpenSubKey(parent))
+                    if (tests != null && tests.SubKeyCount == 0 && tests.ValueCount == 0) { tests.Close(); Registry.CurrentUser.DeleteSubKey(parent, false); }
+                Directory.Delete(folder, true);
+            }
+        }
+        private static void MakeZip(string path, params string[] entries)
+        {
+            using (FileStream stream = File.Create(path))
+            using (ZipArchive archive = new ZipArchive(stream, ZipArchiveMode.Create))
+                foreach (string entry in entries)
+                    using (StreamWriter writer = new StreamWriter(archive.CreateEntry(entry).Open())) writer.Write("content of " + entry);
         }
         // The updater pieces that do not need the network: tags, hashes, release parsing and the exe swap with rollback.
         private static void RunUpdateChecks()
@@ -51,45 +146,51 @@ namespace VietDang.AutoSuite
             Check(Updates.ParseTag("v1.2.3") == new Version(1, 2, 3) && Updates.ParseTag("1.4") == new Version(1, 4, 0) && Updates.ParseTag("beta") == null, "release tags are read as versions");
             Check(Updates.ParseTag("v1.10.0") > Updates.ParseTag("v1.9.9"), "versions compare by number, not by text");
             string hash = new string('a', 64);
-            Check(Updates.ParseHash(hash.ToUpperInvariant() + "  Auto.exe\r\n") == hash && Updates.ParseHash("abc") == null, "sha256 files are read");
+            Check(Updates.ParseHash(hash.ToUpperInvariant() + "  V-TOOL.exe\r\n") == hash && Updates.ParseHash("abc") == null, "sha256 files are read");
             string json = "{\"tag_name\":\"v1.1.0\",\"body\":\"Sửa lỗi\",\"draft\":false,\"prerelease\":false,\"assets\":["
-                + "{\"name\":\"Auto.exe\",\"browser_download_url\":\"https://example.test/Auto.exe\"},"
-                + "{\"name\":\"Auto.exe.sha256\",\"browser_download_url\":\"https://example.test/Auto.exe.sha256\"}]}";
+                + "{\"name\":\"V-TOOL.exe\",\"browser_download_url\":\"https://example.test/V-TOOL.exe\"},"
+                + "{\"name\":\"V-TOOL.exe.sha256\",\"browser_download_url\":\"https://example.test/V-TOOL.exe.sha256\"}]}";
             ReleaseInfo release = Updates.ParseRelease(json);
-            Check(release.Version == new Version(1, 1, 0) && release.Notes == "Sửa lỗi" && release.ExeUrl.EndsWith("/Auto.exe") && release.HashUrl.EndsWith(".sha256"), "GitHub release data is read");
+            Check(release.Version == new Version(1, 1, 0) && release.Notes == "Sửa lỗi" && release.ExeUrl.EndsWith("/V-TOOL.exe") && release.HashUrl.EndsWith(".sha256") && release.Problem == null, "GitHub release data is read");
             Check(Updates.ParseRelease(json.Replace("\"prerelease\":false", "\"prerelease\":true")) == null, "pre-releases are ignored");
-            bool missing = false;
-            try { Updates.ParseRelease(json.Replace("Auto.exe.sha256", "other.txt")); } catch (InvalidDataException) { missing = true; }
-            Check(missing, "a release without any checksum is refused");
-            string digestOnly = "{\"tag_name\":\"v1.2.0\",\"assets\":[{\"name\":\"Auto.exe\",\"browser_download_url\":\"https://example.test/Auto.exe\",\"digest\":\"sha256:" + hash + "\"}]}";
+            Check(Updates.ParseRelease(json.Replace("V-TOOL.exe.sha256", "other.txt")).Problem != null, "a release without any checksum is not installed");
+            string digestOnly = "{\"tag_name\":\"v1.2.0\",\"assets\":[{\"name\":\"V-TOOL.exe\",\"browser_download_url\":\"https://example.test/V-TOOL.exe\",\"digest\":\"sha256:" + hash + "\"}]}";
             ReleaseInfo uploadedExeOnly = Updates.ParseRelease(digestOnly);
-            Check(uploadedExeOnly.Hash == hash && uploadedExeOnly.HashUrl == null, "a release with only Auto.exe uses GitHub's own checksum");
-            string page = "<a href=\"/vietdang170/Auto/releases/download/v1.0.0/Auto.exe\" rel=\"nofollow\">Auto.exe</a>\n<span>sha256:" + hash.ToUpperInvariant() + "</span>";
-            Check(Updates.FindDigest(page) == hash && Updates.FindDigest("<p>no assets</p>") == null, "the checksum is also read from the release page when the API is busy");
+            Check(uploadedExeOnly.Hash == hash && uploadedExeOnly.HashUrl == null && uploadedExeOnly.Problem == null, "a release with only V-TOOL.exe uses GitHub's own checksum");
+            ReleaseInfo oldName = Updates.ParseRelease(digestOnly.Replace("V-TOOL.exe", "Auto.exe"));
+            Check(oldName.Version == new Version(1, 2, 0) && oldName.ExeUrl == null && oldName.Problem != null, "a release without V-TOOL.exe is reported instead of installed");
+            string page = "<a href=\"/vietdang170/V-TOOL/releases/download/v1.0.3/V-TOOL.exe\" rel=\"nofollow\">V-TOOL.exe</a>\n<span>sha256:" + hash.ToUpperInvariant() + "</span>";
+            Check(Updates.FindDigest(page, "V-TOOL.exe") == hash && Updates.FindDigest("<p>no assets</p>", "V-TOOL.exe") == null, "the checksum is also read from the release page when the API is busy");
+            // The exe built next to the tests must be accepted by the updater (assembly V-TOOL, same version).
+            string built = Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)), "V-TOOL.exe");
+            Check(File.Exists(built) && Updates.IsValidPackage(built, Updates.Sha256(built), Updates.Current), "the freshly built V-TOOL.exe passes the updater's own check");
+            Bitmap qr = Donation.LoadQr();
+            Check(qr != null && qr.Width == 296 && qr.Height == 296, "the donation QR code is built into the app");
+            qr.Dispose();
 
-            string folder = Path.Combine(Path.GetTempPath(), "Auto.UpdateChecks." + Guid.NewGuid().ToString("N"));
+            string folder = Path.Combine(Path.GetTempPath(), "V-TOOL.UpdateChecks." + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(folder);
             try
             {
-                string exe = Path.Combine(folder, "Auto.exe"), package = Path.Combine(folder, "download.exe");
+                string exe = Path.Combine(folder, "V-TOOL.exe"), package = Path.Combine(folder, "download.exe");
                 File.WriteAllText(exe, "old"); File.WriteAllText(package, "new");
-                Check(!Updates.IsValidPackage(package, Updates.Sha256(package), new Version(1, 1, 0)), "a file that is not Auto is never installed");
+                Check(!Updates.IsValidPackage(package, Updates.Sha256(package), new Version(1, 1, 0)), "a file that is not V-TOOL is never installed");
                 Updates.Swap(exe, package);
                 Check(File.ReadAllText(exe) == "new" && File.ReadAllText(exe + ".old") == "old" && !File.Exists(exe + ".new"), "swap puts the new exe in place and keeps the old one");
                 Updates.Restore(exe);
                 Check(File.ReadAllText(exe) == "old" && File.ReadAllText(exe + ".failed") == "new" && !File.Exists(exe + ".old"),
                     "restore brings the old exe back");
-                // Running from a copy that is itself called Auto.old.exe must not clash with the backup name.
-                string renamed = Path.Combine(folder, "Auto.old.exe");
+                // Running from a copy that is itself called V-TOOL.old.exe must not clash with the backup name.
+                string renamed = Path.Combine(folder, "V-TOOL.old.exe");
                 File.WriteAllText(renamed, "old");
                 Updates.Swap(renamed, package);
-                Check(File.ReadAllText(renamed) == "new" && File.ReadAllText(renamed + ".old") == "old", "an exe named Auto.old.exe updates too");
+                Check(File.ReadAllText(renamed) == "new" && File.ReadAllText(renamed + ".old") == "old", "an exe named V-TOOL.old.exe updates too");
             }
             finally { Directory.Delete(folder, true); }
         }
         private static void RunChecks()
         {
-            string directory = Path.Combine(Path.GetTempPath(), "Auto.Integration." + Guid.NewGuid().ToString("N"));
+            string directory = Path.Combine(Path.GetTempPath(), "V-TOOL.Integration." + Guid.NewGuid().ToString("N"));
             string settingsPath = Path.Combine(directory, "autoclick.xml");
             try
             {
@@ -99,20 +200,20 @@ namespace VietDang.AutoSuite
                 settings.Scenarios.Add(first);
                 settings.Scenarios.Add(new Scenario { Name = "Kịch bản thứ hai", Mode = RepeatMode.UntilStopped });
                 SettingsStore.Save(settings, settingsPath);
-                using (AutoForm form = new AutoForm(null, settingsPath, true))
+                using (MainWindow form = new MainWindow(null, settingsPath, true))
                 {
                     form.StartPosition = FormStartPosition.Manual; form.ShowInTaskbar = false;
                     form.Show(); form.Location = new Point(-20000, -20000); Application.DoEvents();
                     RadioButton[] navigation = (RadioButton[])Field(form, "_navItems");
                     Panel[] pages = (Panel[])Field(form, "_pages");
-                    Check(form.Text == "Auto" && navigation.Length == 3 && pages.Length == 3 && navigation[2].Text == "Cài đặt", "vertical navigation includes Settings");
-                    Check(navigation[0].Left == navigation[2].Left && navigation[0].Top < navigation[1].Top && navigation[1].Top < navigation[2].Top, "navigation items are stacked vertically");
+                    Check(form.Text == "V-TOOL" && navigation.Length == 4 && pages.Length == 4 && navigation[MainWindow.SettingsPage].Text == "Cài đặt" && navigation[MainWindow.AddinPage].Text == "Add-in Office", "vertical navigation includes Settings");
+                    Check(navigation[0].Left == navigation[3].Left && navigation[0].Top < navigation[1].Top && navigation[1].Top < navigation[2].Top && navigation[2].Top < navigation[3].Top, "navigation items are stacked vertically");
                     Form paste = (Form)Field(form, "_paste"), click = (Form)Field(form, "_click");
-                    Check(!paste.TopLevel && !click.TopLevel && click.Parent == pages[AutoForm.ClickPage] && paste.Parent == pages[AutoForm.PastePage], "both modules run inside one window");
-                    Check(navigation[AutoForm.ClickPage].Text == "Auto Click" && navigation[AutoForm.PastePage].Text == "Auto Paste", "navigation order matches the pages");
+                    Check(!paste.TopLevel && !click.TopLevel && click.Parent == pages[MainWindow.ClickPage] && paste.Parent == pages[MainWindow.PastePage], "both modules run inside one window");
+                    Check(navigation[MainWindow.ClickPage].Text == "Auto Click" && navigation[MainWindow.PastePage].Text == "Auto Paste", "navigation order matches the pages");
                     Check(!((NotifyIcon)Field(paste, "_notifyIcon")).Visible && !((NotifyIcon)Field(click, "_tray")).Visible && ((NotifyIcon)Field(form, "_tray")).Visible, "only one tray icon is visible");
                     Size fixedSize = form.Size;
-                    for (int i = 0; i < 3; i++)
+                    for (int i = 0; i < 4; i++)
                     {
                         Point fixedLocation = form.Location;
                         navigation[i].Checked = true;
@@ -121,14 +222,14 @@ namespace VietDang.AutoSuite
                         while (fade.ElapsedMilliseconds < 350) { Application.DoEvents(); System.Threading.Thread.Sleep(10); }
                         Check(form.Size == fixedSize, "window size remains fixed on page " + i);
                         Check(form.Location == fixedLocation, "window position remains fixed on page " + i);
-                        for (int page = 0; page < 3; page++) Check(pages[page].Visible == (page == i), "only page " + i + " is shown");
+                        for (int page = 0; page < 4; page++) Check(pages[page].Visible == (page == i), "only page " + i + " is shown");
                         using (Bitmap bitmap = new Bitmap(form.Width, form.Height))
                         {
                             form.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
-                            bitmap.Save(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, i == AutoForm.ClickPage ? "Auto.Click.preview.png" : i == AutoForm.PastePage ? "Auto.Paste.preview.png" : "Auto.Settings.preview.png"));
+                            bitmap.Save(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, i == MainWindow.ClickPage ? "V-TOOL.Click.preview.png" : i == MainWindow.PastePage ? "V-TOOL.Paste.preview.png" : i == MainWindow.AddinPage ? "V-TOOL.Addin.preview.png" : "V-TOOL.Settings.preview.png"));
                         }
                     }
-                    Check(pages[AutoForm.ClickPage].ClientSize.Width >= 840 && pages[AutoForm.ClickPage].ClientSize.Height >= 620, "click layout fits the integrated page");
+                    Check(pages[MainWindow.ClickPage].ClientSize.Width >= 840 && pages[MainWindow.ClickPage].ClientSize.Height >= 620, "click layout fits the integrated page");
                     CheckBox startup = (CheckBox)Field(form, "_startupBox");
                     ToolStripMenuItem startupItem = (ToolStripMenuItem)Field(form, "_startupItem");
                     Check(startup.Enabled && startup.Parent != null && !startup.Checked, "Settings offers start with Windows");
