@@ -1,4 +1,4 @@
-# File tạo ra khi build
+# Created again by build-vtool.cmd and release.cmd, so not kept in the repository
 *.exe
 *.exe.bak
 *.exe.old
@@ -7,10 +7,9 @@
 obj/
 release/
 build.log
-
-# File tạm khi test và chẩn đoán
 tests/*.png
 startup-trace.txt
-
-# Thư mục sao lưu
 backup-before-*/
+
+# Copy of the files to upload, made for convenience
+GitHub-upload/
