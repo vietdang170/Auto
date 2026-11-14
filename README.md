@@ -1,2 +1,2 @@
 # Auto
-AutoClick and AutoPaste
+AutoClick and AutoPasteValue
