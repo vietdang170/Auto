@@ -210,7 +210,7 @@ namespace VietDang.VTool
                     Check(navigation[0].Left == navigation[3].Left && navigation[0].Top < navigation[1].Top && navigation[1].Top < navigation[2].Top && navigation[2].Top < navigation[3].Top, "navigation items are stacked vertically");
                     Form paste = (Form)Field(form, "_paste"), click = (Form)Field(form, "_click");
                     Check(!paste.TopLevel && !click.TopLevel && click.Parent == pages[MainWindow.ClickPage] && paste.Parent == pages[MainWindow.PastePage], "both modules run inside one window");
-                    Check(navigation[MainWindow.ClickPage].Text == "Auto Click" && navigation[MainWindow.PastePage].Text == "Auto Paste", "navigation order matches the pages");
+                    Check(navigation[MainWindow.ClickPage].Text == "Auto Click" && navigation[MainWindow.PastePage].Text == "AutoPasteValue", "navigation order matches the pages");
                     Check(!((NotifyIcon)Field(paste, "_notifyIcon")).Visible && !((NotifyIcon)Field(click, "_tray")).Visible && ((NotifyIcon)Field(form, "_tray")).Visible, "only one tray icon is visible");
                     Size fixedSize = form.Size;
                     for (int i = 0; i < 4; i++)
@@ -240,6 +240,13 @@ namespace VietDang.VTool
                     Check(((CheckBox)Field(form, "_updateBox")).Parent != null, "Settings offers the daily update check");
                     Check(AutoPasteValueApp.MainForm.TrimCells("  a   b \t c  \r\n d ") == "a b\tc\r\nd", "trim works per cell like Excel TRIM");
                     Check(AutoPasteValueApp.MainForm.TrimCells("\u00A0Hà  Nội\u00A0") == "Hà Nội", "trim also removes non-breaking spaces");
+                    Check(AutoPasteValueApp.MainForm.CanKeepFormat(13) && AutoPasteValueApp.MainForm.CanKeepFormat((uint)DataFormats.GetFormat(DataFormats.Html).Id) &&
+                        AutoPasteValueApp.MainForm.CanKeepFormat((uint)DataFormats.GetFormat(DataFormats.Rtf).Id), "excluded apps get back text, HTML and RTF");
+                    Check(!AutoPasteValueApp.MainForm.CanKeepFormat(1) && !AutoPasteValueApp.MainForm.CanKeepFormat(2) && !AutoPasteValueApp.MainForm.CanKeepFormat(14) &&
+                        !AutoPasteValueApp.MainForm.CanKeepFormat((uint)DataFormats.GetFormat("Ole Private Data").Id), "synthesized, handle and OLE link formats are not kept");
+                    Check(AutoPasteValueApp.MainForm.IsShellSurface(IntPtr.Zero, "StartMenuExperienceHost.exe") &&
+                        !AutoPasteValueApp.MainForm.IsShellSurface(IntPtr.Zero, "EXCEL.exe") && !AutoPasteValueApp.MainForm.IsShellSurface(IntPtr.Zero, "msedge.exe"),
+                        "Start and the taskbar are passed through, real apps decide the paste");
                     ComboBox hotkeys = (ComboBox)Field(paste, "_cboHotkey");
                     Check(hotkeys.Items.Count == 4 && !hotkeys.Items.Contains("Ctrl + Shift + V"), "Ctrl + Shift + V is no longer offered");
                     form.Close();

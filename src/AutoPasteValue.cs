@@ -116,6 +116,29 @@ namespace AutoPasteValueApp
         [DllImport("user32.dll", SetLastError = true)]
         private static extern IntPtr SetClipboardData(uint format, IntPtr data);
 
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetClipboardData(uint format);
+
+        [DllImport("user32.dll")]
+        private static extern uint EnumClipboardFormats(uint format);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetClipboardFormatName(uint format, StringBuilder name, int count);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern uint RegisterClipboardFormat(string name);
+
+        private delegate void WinEventProc(IntPtr hook, uint eventType, IntPtr hwnd, int objectId, int childId, uint thread, uint time);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr SetWinEventHook(uint eventMin, uint eventMax, IntPtr module, WinEventProc callback, uint process, uint thread, uint flags);
+
+        [DllImport("user32.dll")]
+        private static extern bool UnhookWinEvent(IntPtr hook);
+
+        [DllImport("kernel32.dll")]
+        private static extern UIntPtr GlobalSize(IntPtr memory);
+
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern IntPtr GlobalAlloc(uint flags, UIntPtr bytes);
 
@@ -179,6 +202,11 @@ namespace AutoPasteValueApp
         private const int WM_CLIPBOARDUPDATE = 0x031D;
         private const int WM_HOTKEY = 0x0312;
         private const int HOTKEY_ID = 9001;
+        private const uint EVENT_SYSTEM_FOREGROUND = 0x0003;
+        private const uint WINEVENT_OUTOFCONTEXT = 0x0000;
+        private const uint CF_UNICODETEXT = 13;
+        private const long MaxFormatBytes = 32L * 1024 * 1024;
+        private const long MaxOriginalBytes = 96L * 1024 * 1024;
 
         private const uint MOD_ALT = 0x0001;
         private const uint MOD_CONTROL = 0x0002;
@@ -203,6 +231,18 @@ namespace AutoPasteValueApp
         private bool _processingClipboard;
         private readonly System.Windows.Forms.Timer _clipboardTimer = new System.Windows.Forms.Timer { Interval = 40 };
         private readonly HashSet<string> _excludedApps = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // A copy turned into plain text keeps its original formats here, so an excluded app brought to the front can
+        // still paste it with its formatting. Valid only while the clipboard still holds what AutoPasteValue wrote.
+        private List<KeyValuePair<uint, byte[]>> _originalFormats;
+        private List<KeyValuePair<uint, byte[]>> _plainFormats;
+        private bool _showingOriginal;
+        // A copy left exactly as it was because an excluded app was in front; converted when a normal app comes forward.
+        private uint _deferredSeq;
+        private IntPtr _foregroundHook;
+        private WinEventProc _foregroundProc; // Kept referenced: Windows calls it for as long as the hook lives.
+        private int _swapAttempts;
+        private readonly System.Windows.Forms.Timer _swapTimer = new System.Windows.Forms.Timer { Interval = 50 };
 
         // UI Controls
         private NotifyIcon _notifyIcon;
@@ -230,7 +270,7 @@ namespace AutoPasteValueApp
         private Label _lblNoApps;
         private Pill _appsPill;
 
-        // Only shown when Auto Paste runs as its own window.
+        // Only shown when AutoPasteValue runs as its own window.
         private CheckBox _chkAutoStart;
         private Button _btnClose;
         private Button _btnExit;
@@ -251,6 +291,7 @@ namespace AutoPasteValueApp
             InitializeComponent();
             InitializeTray();
             _clipboardTimer.Tick += ClipboardTimerTick;
+            _swapTimer.Tick += (sender, e) => { _swapTimer.Stop(); SyncClipboardWithForeground(); };
             UpdateStatusUI();
             UpdateHotkeyHint();
         }
@@ -306,6 +347,9 @@ namespace AutoPasteValueApp
             // A failed listener must not take the whole app down; the status card reports it instead.
             _listening = AddClipboardFormatListener(this.Handle);
             if (!_listening) Trace.TraceWarning("Clipboard listener unavailable: Win32 error {0}", Marshal.GetLastWin32Error());
+            _foregroundProc = OnForegroundChanged;
+            _foregroundHook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, IntPtr.Zero, _foregroundProc, 0, 0, WINEVENT_OUTOFCONTEXT);
+            if (_foregroundHook == IntPtr.Zero) Trace.TraceWarning("Foreground hook unavailable: excluded apps only apply to copies made in them");
             RegisterCurrentHotkey();
             if (_notifyIcon != null) UpdateStatusUI();
         }
@@ -320,6 +364,8 @@ namespace AutoPasteValueApp
         protected override void OnHandleDestroyed(EventArgs e)
         {
             _clipboardTimer.Stop();
+            _swapTimer.Stop();
+            if (_foregroundHook != IntPtr.Zero) { UnhookWinEvent(_foregroundHook); _foregroundHook = IntPtr.Zero; }
             RemoveClipboardFormatListener(this.Handle);
             UnregisterHotKey(this.Handle, HOTKEY_ID);
             base.OnHandleDestroyed(e);
@@ -330,6 +376,7 @@ namespace AutoPasteValueApp
             if (disposing)
             {
                 _clipboardTimer.Dispose();
+                _swapTimer.Dispose();
                 if (_notifyIcon != null) _notifyIcon.Dispose();
                 if (_contextMenu != null) _contextMenu.Dispose();
                 if (_iconActive != null) _iconActive.Dispose();
@@ -348,6 +395,7 @@ namespace AutoPasteValueApp
             }
 
             _clipboardTimer.Stop();
+            _swapTimer.Stop();
 
             if (_notifyIcon != null)
             {
@@ -408,6 +456,12 @@ namespace AutoPasteValueApp
         private void QueueClipboardChange()
         {
             uint seq = GetClipboardSequenceNumber();
+            // Someone else changed the clipboard: the kept original and any copy waiting for a normal app are gone.
+            if (seq != 0 && seq != _myLastClipboardSeq)
+            {
+                ForgetOriginal();
+                if (seq != _deferredSeq) _deferredSeq = 0;
+            }
             if (!_isEnabled || _isRealExit || seq == 0 || seq == _myLastClipboardSeq) return;
             if (seq != _pendingClipboardSeq)
             {
@@ -415,6 +469,17 @@ namespace AutoPasteValueApp
                 _clipboardAttempts = 0;
             }
             if (_clipboardAttempts < 50) _clipboardTimer.Start();
+        }
+
+        // A copy left untouched while an excluded app was in front is converted once a normal app comes forward.
+        private void ConvertDeferredCopy()
+        {
+            uint seq = _deferredSeq;
+            _deferredSeq = 0;
+            _pendingClipboardSeq = seq;
+            _clipboardAttempts = 0;
+            _clipboardTimer.Stop();
+            _clipboardTimer.Start();
         }
 
         private void ClipboardTimerTick(object sender, EventArgs e)
@@ -447,13 +512,15 @@ namespace AutoPasteValueApp
                 QueueClipboardChange();
             else if (!complete && _clipboardAttempts < 50)
                 _clipboardTimer.Start();
+            else if (_deferredSeq != 0)
+                SyncClipboardWithForeground(); // A normal app may have come forward while this copy was being read.
         }
 
         private bool ProcessClipboardChange(uint seq)
         {
             if (GetClipboardSequenceNumber() != seq) return true;
             Application.OleRequired();
-            bool? allowed = CanNormalizeClipboardSource();
+            bool? allowed = CanConvertNow(seq);
             if (allowed != true) return allowed.HasValue;
 
             // WinForms GetDataObject sleeps on contention; let our timer retry instead.
@@ -505,7 +572,7 @@ namespace AutoPasteValueApp
             string text = data.GetData(DataFormats.UnicodeText) as string;
             if (text == null) text = data.GetData(DataFormats.Text) as string;
             if (text == null) return false;
-            bool? allowed = CanNormalizeClipboardSource();
+            bool? allowed = CanConvertNow(seq);
             if (allowed != true) return allowed.HasValue;
             if (!_isEnabled || _isRealExit || IsDisposed) return true;
             return TryWritePlainText(_trimSpaces ? TrimCells(text) : text, seq);
@@ -520,7 +587,7 @@ namespace AutoPasteValueApp
             if (text == null) return true;
             string trimmed = TrimCells(text);
             if (trimmed == text) return true;
-            bool? allowed = CanNormalizeClipboardSource();
+            bool? allowed = CanConvertNow(seq);
             if (allowed != true) return allowed.HasValue;
             if (!_isEnabled || _isRealExit || IsDisposed) return true;
             return TryWritePlainText(trimmed, seq);
@@ -550,12 +617,23 @@ namespace AutoPasteValueApp
             return result.ToString();
         }
 
+        // Excluded apps are about where the copy is pasted, not where it came from: while one is in front the copy is
+        // left exactly as it is (null: retry later, false: leave it, true: make it plain text now).
+        private bool? CanConvertNow(uint seq)
+        {
+            if (ForegroundWantsPlain() != true)
+            {
+                _deferredSeq = seq;
+                return false;
+            }
+            return CanNormalizeClipboardSource();
+        }
+
         private bool? CanNormalizeClipboardSource()
         {
             IntPtr source = GetClipboardOwner();
             if (source == IntPtr.Zero) source = GetForegroundWindow();
             string process = GetProcessName(source);
-            if (IsProcessExcluded(process)) return false;
             if (!process.Equals("EXCEL.exe", StringComparison.OrdinalIgnoreCase)) return true;
 
             uint sourcePid;
@@ -608,34 +686,217 @@ namespace AutoPasteValueApp
 
         private bool TryWritePlainText(string text, uint expectedSeq)
         {
-            char[] chars = (text + '\0').ToCharArray();
-            IntPtr memory = GlobalAlloc(0x0002, new UIntPtr(checked((uint)chars.Length * 2)));
-            if (memory == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+            List<KeyValuePair<uint, byte[]>> plain = new List<KeyValuePair<uint, byte[]>>();
+            plain.Add(new KeyValuePair<uint, byte[]>(CF_UNICODETEXT, Encoding.Unicode.GetBytes(text + "\0")));
+            List<KeyValuePair<uint, byte[]>> original = new List<KeyValuePair<uint, byte[]>>();
+            bool written;
+            if (!TryReplaceClipboard(plain, expectedSeq, original, out written)) return false;
+            if (!written) return true;
+            _originalFormats = original.Count > 0 ? original : null;
+            _plainFormats = plain;
+            _showingOriginal = false;
+            _swapAttempts = 0;
+            // The copy may already sit in front of an excluded app (copied, then switched right away).
+            SyncClipboardWithForeground();
+            return true;
+        }
+
+        // Replaces the clipboard with the given formats while it still holds expectedSeq. False means the clipboard
+        // is busy and the caller should retry; written tells whether anything was replaced. When original is given,
+        // it receives the formats the clipboard held just before, read under the same lock.
+        private bool TryReplaceClipboard(List<KeyValuePair<uint, byte[]>> formats, uint expectedSeq,
+            List<KeyValuePair<uint, byte[]>> original, out bool written)
+        {
+            written = false;
+            if (!OpenClipboard(this.Handle)) return false;
             try
             {
-                IntPtr pointer = GlobalLock(memory);
-                if (pointer == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
-                try { Marshal.Copy(chars, 0, pointer, chars.Length); }
-                finally { GlobalUnlock(memory); }
+                // Check while locked so a newer copy cannot be replaced with an older snapshot.
+                if (GetClipboardSequenceNumber() != expectedSeq) return true;
+                if (original != null) ReadOpenClipboard(original);
+                if (!EmptyClipboard()) throw new Win32Exception(Marshal.GetLastWin32Error());
+                int stored = 0, error = 0;
+                foreach (KeyValuePair<uint, byte[]> format in formats)
+                {
+                    IntPtr memory = ToGlobal(format.Value);
+                    if (SetClipboardData(format.Key, memory) == IntPtr.Zero)
+                    {
+                        // One rejected format must not lose the others; only a clipboard left empty is an error.
+                        error = Marshal.GetLastWin32Error();
+                        GlobalFree(memory);
+                        continue;
+                    }
+                    stored++; // Windows now owns this buffer.
+                }
+                if (stored == 0) throw new Win32Exception(error);
+                written = true;
+            }
+            finally { CloseClipboard(); }
+            // Windows adds the synthesized formats (Locale, Text, OEMText) when the clipboard closes, which moves the
+            // sequence number on again: only the number after closing identifies this write.
+            if (GetClipboardOwner() == this.Handle) _myLastClipboardSeq = GetClipboardSequenceNumber();
+            return true;
+        }
 
-                if (!OpenClipboard(this.Handle)) return false;
+        private static IntPtr ToGlobal(byte[] bytes)
+        {
+            IntPtr memory = GlobalAlloc(0x0002, new UIntPtr((ulong)Math.Max(1, bytes.Length)));
+            if (memory == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+            IntPtr pointer = GlobalLock(memory);
+            if (pointer == IntPtr.Zero)
+            {
+                int error = Marshal.GetLastWin32Error();
+                GlobalFree(memory);
+                throw new Win32Exception(error);
+            }
+            try { Marshal.Copy(bytes, 0, pointer, bytes.Length); }
+            finally { GlobalUnlock(memory); }
+            return memory;
+        }
+
+        // Copies every memory-based format of the open clipboard. Formats Windows rebuilds by itself, handle-based
+        // GDI formats and OLE object links (which point back into the source app) are left out.
+        private static void ReadOpenClipboard(List<KeyValuePair<uint, byte[]>> result)
+        {
+            List<uint> available = new List<uint>();
+            uint next = 0;
+            while ((next = EnumClipboardFormats(next)) != 0) available.Add(next);
+            long total = 0;
+            // Formats come in the source app's order of preference; a huge Excel range renders each one slowly, so
+            // stop collecting after a few seconds and keep the richest ones already read.
+            Stopwatch elapsed = Stopwatch.StartNew();
+            foreach (uint format in available)
+            {
+                if (elapsed.ElapsedMilliseconds > 3000) break;
+                if (!CanKeepFormat(format)) continue;
+                IntPtr handle = GetClipboardData(format);
+                if (handle == IntPtr.Zero) continue;
+                long size = (long)GlobalSize(handle).ToUInt64();
+                if (size <= 0 || size > MaxFormatBytes || total + size > MaxOriginalBytes) continue;
+                IntPtr pointer = GlobalLock(handle);
+                if (pointer == IntPtr.Zero) continue;
                 try
                 {
-                    // Check while locked so a newer copy cannot be replaced with an older snapshot.
-                    if (GetClipboardSequenceNumber() != expectedSeq) return true;
-                    if (!EmptyClipboard()) throw new Win32Exception(Marshal.GetLastWin32Error());
-                    if (SetClipboardData(13, memory) == IntPtr.Zero)
-                        throw new Win32Exception(Marshal.GetLastWin32Error());
-                    memory = IntPtr.Zero; // Windows now owns this immediately rendered Unicode buffer.
-                    _myLastClipboardSeq = GetClipboardSequenceNumber();
-                    return true;
+                    byte[] bytes = new byte[size];
+                    Marshal.Copy(pointer, bytes, 0, (int)size);
+                    result.Add(new KeyValuePair<uint, byte[]>(format, bytes));
+                    total += size;
                 }
-                finally { CloseClipboard(); }
+                finally { GlobalUnlock(handle); }
             }
-            finally
+        }
+
+        private static readonly string[] OleObjectFormats =
+        {
+            "Ole Private Data", "DataObject", "Object Descriptor", "Link Source Descriptor", "Embed Source",
+            "Embedded Object", "Link Source", "ObjectLink", "OwnerLink", "Native"
+        };
+
+        internal static bool CanKeepFormat(uint format)
+        {
+            // Text and OEM text are synthesized from Unicode text. Bitmap, metafile, palette, enhanced metafile,
+            // owner display and private/GDI ranges are handles, not memory blocks. DIB and DIBV5 are only previews
+            // of a copy that also has text, and rendering them for a large Excel range is slow.
+            if (format == 1 || format == 2 || format == 3 || format == 7 || format == 8 || format == 9 || format == 14 || format == 17) return false;
+            if (format >= 0x0080 && format <= 0x03FF) return false;
+            if (format < 0xC000) return true;
+            StringBuilder name = new StringBuilder(128);
+            if (GetClipboardFormatName(format, name, name.Capacity) == 0) return false;
+            return Array.IndexOf(OleObjectFormats, name.ToString()) < 0;
+        }
+
+        private void OnForegroundChanged(IntPtr hook, uint eventType, IntPtr hwnd, int objectId, int childId, uint thread, uint time)
+        {
+            if (_originalFormats == null && _deferredSeq == 0) return;
+            _swapAttempts = 0;
+            SyncClipboardWithForeground();
+        }
+
+        // Which content the app in front should get: true for plain text, false for the original copy (an excluded
+        // app), null for windows only passed through while switching apps (taskbar, Alt + Tab, Start, desktop,
+        // V-TOOL itself), which change nothing.
+        private bool? ForegroundWantsPlain()
+        {
+            IntPtr window = GetForegroundWindow();
+            if (window == IntPtr.Zero) return null;
+            uint pid = WindowProcessId(window);
+            if (pid == 0 || pid == SelfProcessId) return null;
+            string exe = ProcessExe(pid);
+            if (exe == null || IsShellSurface(window, exe)) return null;
+            return !IsProcessExcluded(exe);
+        }
+
+        private static readonly uint SelfProcessId = (uint)Process.GetCurrentProcess().Id;
+
+        private static readonly string[] ShellProcesses =
+        {
+            "StartMenuExperienceHost.exe", "SearchHost.exe", "SearchApp.exe", "ShellExperienceHost.exe", "ShellHost.exe", "LockApp.exe"
+        };
+
+        private static readonly string[] ShellWindowClasses =
+        {
+            "Shell_TrayWnd", "Shell_SecondaryTrayWnd", "XamlExplorerHostIslandWindow", "MultitaskingViewFrame", "TaskSwitcherWnd",
+            "ForegroundStaging", "Progman", "WorkerW", "NotifyIconOverflowWindow", "TopLevelWindowForOverflowXamlIsland"
+        };
+
+        internal static bool IsShellSurface(IntPtr window, string exe)
+        {
+            foreach (string shell in ShellProcesses)
+                if (string.Equals(exe, shell, StringComparison.OrdinalIgnoreCase)) return true;
+            if (!string.Equals(exe, "explorer.exe", StringComparison.OrdinalIgnoreCase)) return false;
+            StringBuilder name = new StringBuilder(64);
+            GetClassName(window, name, name.Capacity);
+            return Array.IndexOf(ShellWindowClasses, name.ToString()) >= 0;
+        }
+
+        // Excluded apps get the original formatted copy; every other app gets the plain text. Also used when
+        // AutoPasteValue is switched off, which hands the original back.
+        private void SyncClipboardWithForeground()
+        {
+            if (_isolated || _isRealExit || IsDisposed) return;
+            // An OLE read in progress pumps messages; the conversion it finishes syncs again.
+            if (_processingClipboard) return;
+            if (_originalFormats == null && _deferredSeq == 0) return;
+            bool? wantsPlain = _isEnabled ? ForegroundWantsPlain() : false;
+            if (!wantsPlain.HasValue) return;
+            uint seq = GetClipboardSequenceNumber();
+            if (_deferredSeq != 0)
             {
-                if (memory != IntPtr.Zero) GlobalFree(memory);
+                // A copy made while an excluded app was in front: a normal app now needs it as plain text.
+                if (seq != _deferredSeq) _deferredSeq = 0;
+                else if (wantsPlain.Value) { ConvertDeferredCopy(); return; }
             }
+            if (_originalFormats == null) return;
+            if (seq != _myLastClipboardSeq) { ForgetOriginal(); return; }
+            bool wantOriginal = !wantsPlain.Value;
+            if (wantOriginal == _showingOriginal) return;
+
+            List<KeyValuePair<uint, byte[]>> formats = new List<KeyValuePair<uint, byte[]>>(wantOriginal ? _originalFormats : _plainFormats);
+            // Swaps are the same copy: keep them out of Windows clipboard history (Win + V).
+            formats.Add(new KeyValuePair<uint, byte[]>(RegisterClipboardFormat("CanIncludeInClipboardHistory"), new byte[4]));
+            bool written = false, done;
+            try { done = TryReplaceClipboard(formats, seq, null, out written); }
+            catch (ExternalException ex)
+            {
+                Trace.TraceWarning("Clipboard swap failed: {0}", ex.Message);
+                done = false;
+            }
+            if (!done)
+            {
+                // The clipboard is busy for a moment; try again shortly instead of waiting for the next switch.
+                if (++_swapAttempts < 20) _swapTimer.Start();
+                return;
+            }
+            if (written) _showingOriginal = wantOriginal;
+            else ForgetOriginal();
+        }
+
+        private void ForgetOriginal()
+        {
+            _originalFormats = null;
+            _plainFormats = null;
+            _showingOriginal = false;
+            _swapTimer.Stop();
         }
 
         private static bool IsPlainTextFormat(string f)
@@ -655,6 +916,11 @@ namespace AutoPasteValueApp
         {
             _isEnabled = !_isEnabled;
             if (!_isEnabled) _clipboardTimer.Stop();
+            // Switching off hands the last copy back with its formatting; switching on again makes it plain,
+            // including a copy made while it was off.
+            _swapAttempts = 0;
+            SyncClipboardWithForeground();
+            if (_isEnabled) QueueClipboardChange();
             UpdateStatusUI();
 
             if (_playSound)
@@ -676,7 +942,7 @@ namespace AutoPasteValueApp
                 : "Đang tạm dừng: nội dung copy giữ nguyên định dạng gốc.";
 
             // The filled green button is always the action that turns the feature on.
-            _btnToggle.Text = _isEnabled ? "Tắt Auto Paste" : "Bật Auto Paste";
+            _btnToggle.Text = _isEnabled ? "Tắt AutoPasteValue" : "Bật AutoPasteValue";
             _btnToggle.GlyphText = _isEnabled ? Glyph.Pause : Glyph.Play;
             _btnToggle.Kind = _isEnabled ? ButtonKind.Secondary : ButtonKind.Success;
 
@@ -687,7 +953,7 @@ namespace AutoPasteValueApp
 
             Icon icon = _isEnabled ? _iconActive : _iconInactive;
             _notifyIcon.Icon = icon;
-            _notifyIcon.Text = _isEnabled ? "Auto Paste Value: ĐANG BẬT" : "Auto Paste Value: ĐANG TẮT";
+            _notifyIcon.Text = _isEnabled ? "AutoPasteValue: ĐANG BẬT" : "AutoPasteValue: ĐANG TẮT";
             if (!_embedded) this.Icon = icon;
 
             _menuItemStatus.Text = _isEnabled ? "Trạng thái: ĐANG BẬT" : "Trạng thái: ĐANG TẮT";
@@ -792,23 +1058,27 @@ namespace AutoPasteValueApp
 
         private static string GetProcessName(IntPtr hwnd)
         {
-            try
-            {
-                if (hwnd == IntPtr.Zero) return "";
+            if (hwnd == IntPtr.Zero) return "";
+            string exe = ProcessExe(WindowProcessId(hwnd));
+            return exe ?? "";
+        }
 
-                uint pid;
-                GetWindowThreadProcessId(hwnd, out pid);
-                if (pid == 0) return "";
-
-                using (Process proc = Process.GetProcessById((int)pid))
-                {
-                    return proc.ProcessName + ".exe";
-                }
-            }
-            catch
+        // The process behind a window. Store apps run inside ApplicationFrameHost; the app itself owns the CoreWindow child.
+        private static uint WindowProcessId(IntPtr hwnd)
+        {
+            uint pid;
+            GetWindowThreadProcessId(hwnd, out pid);
+            if (pid == 0 || !string.Equals(ProcessExe(pid), "ApplicationFrameHost.exe", StringComparison.OrdinalIgnoreCase)) return pid;
+            uint host = pid;
+            EnumChildWindows(hwnd, (child, ignored) =>
             {
-                return "";
-            }
+                uint childPid;
+                GetWindowThreadProcessId(child, out childPid);
+                if (childPid == host) return true;
+                pid = childPid;
+                return false;
+            }, IntPtr.Zero);
+            return pid;
         }
 
         private void AddExcludedApp(string appExeName)
@@ -865,23 +1135,8 @@ namespace AutoPasteValueApp
                 if (DwmGetWindowAttribute(hwnd, 14, out cloaked, sizeof(int)) == 0 && cloaked != 0) return true;
                 StringBuilder title = new StringBuilder(256);
                 if (GetWindowText(hwnd, title, title.Capacity) == 0) return true;
-                uint pid;
-                GetWindowThreadProcessId(hwnd, out pid);
+                uint pid = WindowProcessId(hwnd);
                 string exe = ProcessExe(pid);
-                // Store apps run inside ApplicationFrameHost; the app itself owns the CoreWindow child.
-                if (string.Equals(exe, "ApplicationFrameHost.exe", StringComparison.OrdinalIgnoreCase))
-                {
-                    uint host = pid;
-                    EnumChildWindows(hwnd, (child, ignored) =>
-                    {
-                        uint childPid;
-                        GetWindowThreadProcessId(child, out childPid);
-                        if (childPid == host) return true;
-                        pid = childPid;
-                        return false;
-                    }, IntPtr.Zero);
-                    exe = ProcessExe(pid);
-                }
                 if (exe == null || pid == (uint)self || _excludedApps.Contains(exe) || !seen.Add(exe)) return true;
                 apps.Add(new KeyValuePair<string, string>(exe, title.ToString()));
                 return true;
@@ -892,6 +1147,7 @@ namespace AutoPasteValueApp
 
         private static string ProcessExe(uint pid)
         {
+            if (pid == 0) return null;
             try { using (Process process = Process.GetProcessById((int)pid)) return process.ProcessName + ".exe"; }
             catch (ArgumentException) { return null; }
             catch (InvalidOperationException) { return null; }
@@ -921,7 +1177,7 @@ namespace AutoPasteValueApp
                 layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
                 layout.Controls.Add(new Label
                 {
-                    Text = "Các ứng dụng đang có cửa sổ trên thanh tác vụ. Chọn ứng dụng để Auto Paste giữ nguyên định dạng khi copy từ đó.",
+                    Text = "Các ứng dụng đang có cửa sổ trên thanh tác vụ. Chọn ứng dụng để AutoPasteValue giữ nguyên định dạng khi dán vào đó.",
                     Dock = DockStyle.Fill, Margin = Padding.Empty, Font = Theme.Small, ForeColor = Muted, UseMnemonic = false
                 }, 0, 0);
 
@@ -1089,7 +1345,7 @@ namespace AutoPasteValueApp
         #region UI Layout & Tray
         private void InitializeComponent()
         {
-            this.Text = "Auto Paste Value";
+            this.Text = "AutoPasteValue";
             this.AutoScaleDimensions = new SizeF(96, 96);
             this.AutoScaleMode = AutoScaleMode.Dpi;
             this.ClientSize = new Size(840, _embedded ? 620 : 664);
@@ -1110,7 +1366,7 @@ namespace AutoPasteValueApp
 
             // Page header with the live state on the right.
             Card header = Kit.PageHeader(Glyph.Paste, "Tự động dán giá trị",
-                "Auto Paste · Chuyển nội dung copy thành giá trị thuần, giữ Tab và xuống dòng cho Excel và Google Sheets");
+                "AutoPasteValue · Chuyển nội dung copy thành giá trị thuần, giữ Tab và xuống dòng cho Excel và Google Sheets");
             _statePill = new Pill { Dot = true, Font = Theme.SmallBold };
             header.AddHeader(_statePill);
             root.Controls.Add(header, 0, 0);
@@ -1125,7 +1381,7 @@ namespace AutoPasteValueApp
             stateBody.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             _lblStatus = new Label { Dock = DockStyle.Fill, Margin = Padding.Empty, Font = Theme.Status, TextAlign = ContentAlignment.MiddleLeft, UseMnemonic = false };
             _lblInfo = new Label { Dock = DockStyle.Fill, Margin = Padding.Empty, Font = Theme.Small, ForeColor = Theme.Muted, UseMnemonic = false };
-            _btnToggle = new UiButton("Tắt Auto Paste", Glyph.Pause, ButtonKind.Secondary)
+            _btnToggle = new UiButton("Tắt AutoPasteValue", Glyph.Pause, ButtonKind.Secondary)
             {
                 AutoFit = false,
                 Height = 38,
@@ -1205,7 +1461,7 @@ namespace AutoPasteValueApp
             Card exclude = new Card(Glyph.Apps, "Ứng dụng loại trừ") { Dock = DockStyle.Fill, Margin = Padding.Empty };
             _appsPill = new Pill { Font = Theme.MonoSmall };
             exclude.AddTitleBadge(_appsPill);
-            exclude.AddHeader(Kit.Note("Giữ nguyên định dạng gốc khi copy"));
+            exclude.AddHeader(Kit.Note("Giữ nguyên định dạng gốc khi dán vào"));
             TableLayoutPanel excludeBody = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2, Margin = Padding.Empty };
             excludeBody.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             excludeBody.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 178));
@@ -1248,7 +1504,7 @@ namespace AutoPasteValueApp
             excludeButtons.Controls.Add(browse);
             excludeButtons.Controls.Add(remove);
 
-            InfoNote note = new InfoNote(Glyph.Info, "Khi copy từ các ứng dụng trong danh sách, Auto Paste để nguyên định dạng gốc (màu chữ, bảng, công thức…).")
+            InfoNote note = new InfoNote(Glyph.Info, "Dán vào các ứng dụng trong danh sách sẽ giữ nguyên định dạng gốc (màu chữ, bảng, công thức…), dù copy từ đâu.")
             {
                 Dock = DockStyle.Fill,
                 Margin = new Padding(0, 10, 0, 0)
@@ -1352,7 +1608,7 @@ namespace AutoPasteValueApp
             _notifyIcon = new NotifyIcon
             {
                 Icon = _iconActive,
-                Text = "Auto Paste Value: ĐANG BẬT",
+                Text = "AutoPasteValue: ĐANG BẬT",
                 Visible = !_embedded,
                 ContextMenuStrip = _contextMenu
             };

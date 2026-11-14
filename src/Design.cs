@@ -4,7 +4,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Windows.Forms;
 
-// Shared look for Auto, Auto Paste and Auto Click: light grey page, white rounded cards, icon headings.
+// Shared look for Auto, AutoPasteValue and Auto Click: light grey page, white rounded cards, icon headings.
 namespace VietDang.Design
 {
     internal static class Theme

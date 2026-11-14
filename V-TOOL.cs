@@ -45,7 +45,7 @@ namespace VietDang.VTool
                 {
                     if (!pasteAvailable || !clickAvailable)
                     {
-                        MessageBox.Show("Hãy thoát hẳn Auto, Auto Paste Value hoặc Auto Click cũ ở khay hệ thống, rồi mở " + AppName + ".", AppName);
+                        MessageBox.Show("Hãy thoát hẳn Auto, AutoPasteValue hoặc Auto Click cũ ở khay hệ thống, rồi mở " + AppName + ".", AppName);
                         return;
                     }
                     Application.EnableVisualStyles();
@@ -134,7 +134,7 @@ namespace VietDang.VTool
         }
     }
 
-    // V-TOOL starts from its own Run entry. Entries left by the versions called Auto, and by the old Auto Paste Value app,
+    // V-TOOL starts from its own Run entry. Entries left by the versions called Auto, and by the old AutoPasteValue app,
     // are moved to it.
     internal static class Startup
     {
@@ -232,7 +232,7 @@ namespace VietDang.VTool
         }
     }
 
-    // The app's own preferences, separate from the Auto Paste and Auto Click settings.
+    // The app's own preferences, separate from the AutoPasteValue and Auto Click settings.
     internal static class UpdateSettings
     {
         private const string Key = Program.SettingsKey;
@@ -263,7 +263,7 @@ namespace VietDang.VTool
     {
         private const int NavWidth = 184, PageWidth = 840, PageHeight = 620;
         private const string Author = "Thiết kế bởi VietDang\nZalo: 0974 318 666";
-        // Page order follows the sidebar: Auto Click, Auto Paste, Add-in Office, then Settings.
+        // Page order follows the sidebar: Auto Click, AutoPasteValue, Add-in Office, then Settings.
         internal const int ClickPage = 0, PastePage = 1, AddinPage = 2, SettingsPage = 3;
         private readonly PasteForm _paste;
         private readonly ClickForm _click;
@@ -283,7 +283,7 @@ namespace VietDang.VTool
         private bool _checking, _offering, _offerAfterRun, _startReported;
         private string _updatedSignal, _failedVersion;
         private readonly ContextMenuStrip _menu = new ContextMenuStrip();
-        private readonly ToolStripMenuItem _pasteToggle = new ToolStripMenuItem("Auto Paste");
+        private readonly ToolStripMenuItem _pasteToggle = new ToolStripMenuItem("AutoPasteValue");
         private readonly ToolStripMenuItem _startupItem = new ToolStripMenuItem("Khởi động cùng Windows");
         private readonly NotifyIcon _tray;
         private readonly Icon _iconOn, _iconOff;
@@ -306,7 +306,7 @@ namespace VietDang.VTool
             Icon = _iconOn;
             Boot.Mark("Vẽ icon khay");
             _paste = new PasteForm(true, isolated);
-            Boot.Mark("Tạo trang Auto Paste");
+            Boot.Mark("Tạo trang AutoPasteValue");
             _click = new ClickForm(clickSettings, settingsPath, true);
             Boot.Mark("Tạo trang Auto Click");
 
@@ -334,8 +334,8 @@ namespace VietDang.VTool
             _menu.Items.Add(new ToolStripSeparator());
             _menu.Items.Add("Thoát " + Program.AppName, null, delegate { ExitApp(); });
             _tray = new NotifyIcon { Icon = _iconOn, Text = Program.AppName, ContextMenuStrip = _menu, Visible = true };
-            // A left click flips Auto Paste at once, like the old app. A double click opens the window; its first click has
-            // already flipped Auto Paste, so that flip is undone and a double click never changes the state.
+            // A left click flips AutoPasteValue at once, like the old app. A double click opens the window; its first click has
+            // already flipped AutoPasteValue, so that flip is undone and a double click never changes the state.
             _tray.MouseClick += delegate(object sender, MouseEventArgs e)
             {
                 if (e.Button != MouseButtons.Left) return;
@@ -384,7 +384,7 @@ namespace VietDang.VTool
             UpdateTray();
             // Both modules need window handles now: clipboard listening and hotkeys work while V-TOOL stays in the tray.
             IntPtr pasteHandle = _paste.Handle, clickHandle = _click.Handle;
-            Boot.Mark("Tạo handle Auto Paste / Auto Click");
+            Boot.Mark("Tạo handle AutoPasteValue / Auto Click");
         }
         private static void Embed(Form module, Panel page)
         {
@@ -395,7 +395,7 @@ namespace VietDang.VTool
         private void BuildNavigation()
         {
             _nav.Paint += delegate(object sender, PaintEventArgs e) { using (Pen line = new Pen(Theme.Border)) e.Graphics.DrawLine(line, _nav.Width - 1, 0, _nav.Width - 1, _nav.Height); };
-            string[] titles = { "Auto Click", "Auto Paste", "Add-in Office", "Cài đặt" };
+            string[] titles = { "Auto Click", "AutoPasteValue", "Add-in Office", "Cài đặt" };
             string[] glyphs = { Glyph.Mouse, Glyph.Paste, Glyph.Puzzle, Glyph.Settings };
             for (int i = 0; i < titles.Length; i++)
             {
@@ -460,7 +460,7 @@ namespace VietDang.VTool
 
             Card startup = new Card(Glyph.Power, "Khởi động cùng hệ thống") { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 10) };
             startup.Controls.Add(SettingRow("Mở " + Program.AppName + " khi đăng nhập Windows",
-                Program.AppName + " tự mở, thu nhỏ ở khay hệ thống mỗi khi bạn đăng nhập. Phím tắt và Auto Paste hoạt động ngay.", _startupBox));
+                Program.AppName + " tự mở, thu nhỏ ở khay hệ thống mỗi khi bạn đăng nhập. Phím tắt và AutoPasteValue hoạt động ngay.", _startupBox));
             layout.Controls.Add(startup, 0, 1);
 
             Card update = new Card(Glyph.Sync, "Cập nhật phần mềm") { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 10) };
@@ -571,14 +571,14 @@ namespace VietDang.VTool
             try { _startupBox.Checked = actual; _startupItem.Checked = actual; }
             finally { _syncingStartup = false; }
         }
-        // A grey icon means copies keep their formatting, exactly like the old Auto Paste tray icon.
+        // A grey icon means copies keep their formatting, exactly like the old AutoPasteValue tray icon.
         private void UpdateTray()
         {
             if (_disposed) return;
             bool pasting = _paste.PasteEnabled;
             _pasteToggle.Checked = pasting;
             _tray.Icon = pasting ? _iconOn : _iconOff; Icon = pasting ? _iconOn : _iconOff;
-            _tray.Text = _clickRunning ? Program.AppName + ": Auto Click đang chạy" : pasting ? "Auto Paste ĐANG BẬT · nhấp để tắt" : "Auto Paste ĐANG TẮT · nhấp để bật";
+            _tray.Text = _clickRunning ? Program.AppName + ": Auto Click đang chạy" : pasting ? "AutoPasteValue ĐANG BẬT · nhấp để tắt" : "AutoPasteValue ĐANG TẮT · nhấp để bật";
         }
         protected override void OnShown(EventArgs e)
         {
