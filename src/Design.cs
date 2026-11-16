@@ -4,9 +4,34 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Windows.Forms;
 
-// Shared look for Auto, AutoPasteValue and Auto Click: light grey page, white rounded cards, icon headings.
+// Shared look for Auto, AutoPasteValue and AutoClick: light grey page, white rounded cards, icon headings.
 namespace VietDang.Design
 {
+    // Every size in the code is a pixel size at 100 % (96 DPI). A form is built at that size and then scaled to the screen
+    // once by Dpi.Fit, which scales positions, sizes, paddings and table rows together with the fonts. Sizes set later by
+    // hand (layout and painting code) go through Dpi.Px. Fit must come last: WinForms scales only what already exists.
+    internal static class Dpi
+    {
+        // Integration checks preview 125 % and 150 % screens with this; real runs always leave it at 1.
+        internal static float Simulated = 1f;
+        private static float _screen;
+        internal static float Scale
+        {
+            get
+            {
+                if (_screen == 0f) using (Graphics g = Graphics.FromHwnd(IntPtr.Zero)) _screen = g.DpiX / 96f;
+                return _screen * Simulated;
+            }
+        }
+        internal static int Px(int value) { return (int)Math.Round(value * Scale); }
+        internal static Size Px(Size size) { return new Size(Px(size.Width), Px(size.Height)); }
+        internal static void Fit(ContainerControl form)
+        {
+            form.AutoScaleDimensions = new SizeF(96f / Simulated, 96f / Simulated);
+            form.AutoScaleMode = AutoScaleMode.Dpi;
+        }
+    }
+
     internal static class Theme
     {
         internal static readonly Color Window = Color.FromArgb(243, 244, 246);
@@ -37,17 +62,24 @@ namespace VietDang.Design
         internal static readonly Color AmberSoft = Color.FromArgb(255, 251, 235);
         internal static readonly Color AmberLine = Color.FromArgb(253, 230, 138);
 
-        internal static readonly Font Regular = new Font("Segoe UI", 9f);
-        internal static readonly Font Semibold = new Font("Segoe UI Semibold", 9f);
-        internal static readonly Font Small = new Font("Segoe UI", 8.25f);
-        internal static readonly Font SmallBold = new Font("Segoe UI Semibold", 8.25f);
-        internal static readonly Font Caps = new Font("Segoe UI Semibold", 7.75f);
-        internal static readonly Font CardTitle = new Font("Segoe UI Semibold", 10f);
-        internal static readonly Font PageTitle = new Font("Segoe UI Semibold", 13f);
-        internal static readonly Font Status = new Font("Segoe UI Semibold", 13f);
-        internal static readonly Font Mono = new Font("Consolas", 9.5f);
-        internal static readonly Font MonoBold = new Font("Consolas", 9.5f, FontStyle.Bold);
-        internal static readonly Font MonoSmall = new Font("Consolas", 8.25f);
+        internal static readonly Font Regular = UiFont("Segoe UI", 9f);
+        internal static readonly Font Semibold = UiFont("Segoe UI Semibold", 9f);
+        internal static readonly Font Small = UiFont("Segoe UI", 8.25f);
+        internal static readonly Font SmallBold = UiFont("Segoe UI Semibold", 8.25f);
+        internal static readonly Font Caps = UiFont("Segoe UI Semibold", 7.75f);
+        internal static readonly Font CardTitle = UiFont("Segoe UI Semibold", 10f);
+        internal static readonly Font PageTitle = UiFont("Segoe UI Semibold", 13f);
+        internal static readonly Font Status = UiFont("Segoe UI Semibold", 13f);
+        internal static readonly Font Mono = UiFont("Consolas", 9.5f);
+        internal static readonly Font MonoBold = UiFont("Consolas", 9.5f, FontStyle.Bold);
+        internal static readonly Font MonoSmall = UiFont("Consolas", 8.25f);
+        internal static readonly Font Credit = UiFont("Segoe UI", 7.5f);
+
+        // Point sizes already follow the screen DPI; only a simulated scale needs applying here.
+        internal static Font UiFont(string family, float points, FontStyle style = FontStyle.Regular)
+        {
+            return new Font(family, points * Dpi.Simulated, style);
+        }
 
         private static readonly Dictionary<float, Font> Icons = new Dictionary<float, Font>();
         private static string _iconFamily;
@@ -66,12 +98,12 @@ namespace VietDang.Design
                         if (probe.Name == name) { _iconFamily = name; break; }
                 }
             }
-            font = new Font(_iconFamily, size);
+            font = UiFont(_iconFamily, size);
             Icons[size] = font;
             return font;
         }
 
-        internal static float Scale(Graphics g) { return g.DpiX / 96f; }
+        internal static float Scale(Graphics g) { return g.DpiX / 96f * Dpi.Simulated; }
 
         // The colour a control should clear its corners to: the nearest opaque parent background.
         internal static Color Behind(Control control)
@@ -200,9 +232,9 @@ namespace VietDang.Design
         internal static TextBox CopyText(string text, Font font, Color color, Color back)
         {
             string lines = text.Replace("\r\n", "\n").Replace("\n", "\r\n");
-            TextBox box = new TextBox { Text = lines, ReadOnly = true, Multiline = true, WordWrap = false, ScrollBars = ScrollBars.None, BorderStyle = BorderStyle.None,
+            CopyTextBox box = new CopyTextBox { Text = lines, ReadOnly = true, Multiline = true, WordWrap = false, ScrollBars = ScrollBars.None, BorderStyle = BorderStyle.None,
                 Font = font, ForeColor = color, BackColor = back, TabStop = false, Margin = Padding.Empty };
-            box.Height = TextRenderer.MeasureText(lines, font).Height + 2;
+            box.FitHeight();
             ContextMenuStrip menu = new ContextMenuStrip();
             menu.Items.Add("Sao chép", null, delegate
             {
@@ -220,6 +252,13 @@ namespace VietDang.Design
         {
             return new Label { Text = text, AutoSize = true, Font = Theme.Small, ForeColor = Theme.Muted, UseMnemonic = false };
         }
+    }
+
+    // Its height follows the text, which is measured in screen pixels already, so it is measured again after scaling.
+    internal sealed class CopyTextBox : TextBox
+    {
+        internal void FitHeight() { Height = TextRenderer.MeasureText(Text, Font).Height + Dpi.Px(2); }
+        protected override void ScaleControl(SizeF factor, BoundsSpecified specified) { base.ScaleControl(factor, specified); FitHeight(); }
     }
 
     internal abstract class Painted : Control
@@ -267,19 +306,20 @@ namespace VietDang.Design
         protected override void OnLayout(LayoutEventArgs e)
         {
             base.OnLayout(e);
-            int band = _title == null ? ClientSize.Height : HeaderHeight, x = ClientSize.Width - 14;
+            int head = Dpi.Px(HeaderHeight);
+            int band = _title == null ? ClientSize.Height : head, x = ClientSize.Width - Dpi.Px(14);
             foreach (Control control in _header)
             {
                 x -= control.Width;
                 control.Location = new Point(x, Math.Max(0, (band - control.Height) / 2));
-                x -= 6;
+                x -= Dpi.Px(6);
             }
             if (_badge != null && _title != null)
             {
                 int titleWidth = TextRenderer.MeasureText(_title, Theme.CardTitle, Size.Empty, Theme.Line).Width;
-                _badge.Location = new Point(40 + titleWidth + 10, (HeaderHeight - _badge.Height) / 2);
+                _badge.Location = new Point(Dpi.Px(50) + titleWidth, (head - _badge.Height) / 2);
             }
-            foreach (Control control in _fit) control.Width = Math.Max(0, x - 4 - control.Left);
+            foreach (Control control in _fit) control.Width = Math.Max(0, x - Dpi.Px(4) - control.Left);
         }
         protected override void OnPaint(PaintEventArgs e)
         {
@@ -287,14 +327,15 @@ namespace VietDang.Design
             g.Clear(Theme.Behind(this));
             Theme.Box(g, ClientRectangle, 8f * Theme.Scale(g), BackColor, Theme.Border);
             if (_title == null) return;
+            int head = Dpi.Px(HeaderHeight), left = Dpi.Px(14), icon = Dpi.Px(22), text = Dpi.Px(40);
             if (_titleIcon != null)
             {
                 int size = _titleIcon.Width;
-                g.DrawIcon(_titleIcon, new Rectangle(14 + (22 - size) / 2, (HeaderHeight - size) / 2, size, size));
+                g.DrawIcon(_titleIcon, new Rectangle(left + (icon - size) / 2, (head - size) / 2, size, size));
             }
-            else TextRenderer.DrawText(g, _glyph ?? "", Theme.Icon(11f), new Rectangle(14, 0, 22, HeaderHeight), Theme.Body, Theme.Line);
-            TextRenderer.DrawText(g, _title, Theme.CardTitle, new Rectangle(40, 0, Math.Max(0, ClientSize.Width - 54), HeaderHeight), Theme.Text, Theme.Line | TextFormatFlags.EndEllipsis);
-            using (Pen line = new Pen(Theme.Divider)) g.DrawLine(line, 1, HeaderHeight, ClientSize.Width - 2, HeaderHeight);
+            else TextRenderer.DrawText(g, _glyph ?? "", Theme.Icon(11f), new Rectangle(left, 0, icon, head), Theme.Body, Theme.Line);
+            TextRenderer.DrawText(g, _title, Theme.CardTitle, new Rectangle(text, 0, Math.Max(0, ClientSize.Width - text - left), head), Theme.Text, Theme.Line | TextFormatFlags.EndEllipsis);
+            using (Pen line = new Pen(Theme.Divider)) g.DrawLine(line, 1, head, ClientSize.Width - 2, head);
         }
     }
 
@@ -328,9 +369,11 @@ namespace VietDang.Design
         {
             if (!_autoFit) return;
             bool hasText = !string.IsNullOrEmpty(Text), hasGlyph = !string.IsNullOrEmpty(_glyph);
-            int width = !hasText ? Height + 2 : 22 + TextRenderer.MeasureText(Text, Font, Size.Empty, Theme.Line).Width + (hasGlyph ? 22 : 0);
-            Width = Math.Max(_minimum, width);
+            int width = !hasText ? Height + Dpi.Px(2) : Dpi.Px(22) + TextRenderer.MeasureText(Text, Font, Size.Empty, Theme.Line).Width + (hasGlyph ? Dpi.Px(22) : 0);
+            Width = Math.Max(Dpi.Px(_minimum), width);
         }
+        // The text is measured in screen pixels already, so the width is worked out again instead of scaled.
+        protected override void ScaleControl(SizeF factor, BoundsSpecified specified) { base.ScaleControl(factor, specified); Fit(); }
         protected override void OnTextChanged(EventArgs e) { base.OnTextChanged(e); Fit(); Invalidate(); }
         protected override void OnFontChanged(EventArgs e) { base.OnFontChanged(e); Fit(); Invalidate(); }
         protected override void OnMouseEnter(EventArgs e) { base.OnMouseEnter(e); _hover.To(1f); }
@@ -376,8 +419,9 @@ namespace VietDang.Design
         private void Fit()
         {
             Size text = TextRenderer.MeasureText(Text ?? "", Font, Size.Empty, Theme.Line);
-            Size = new Size(text.Width + 18 + (_dot ? 13 : 0), Math.Max(22, text.Height + 8));
+            Size = new Size(text.Width + Dpi.Px(18) + (_dot ? Dpi.Px(13) : 0), Math.Max(Dpi.Px(22), text.Height + Dpi.Px(8)));
         }
+        protected override void ScaleControl(SizeF factor, BoundsSpecified specified) { base.ScaleControl(factor, specified); Fit(); }
         protected override void OnPaint(PaintEventArgs e)
         {
             Graphics g = e.Graphics;
@@ -421,8 +465,10 @@ namespace VietDang.Design
         internal InfoNote(string glyph, string text)
         {
             _glyph = glyph; Font = Theme.Small; ForeColor = Theme.Body; Text = text; Height = 30;
-            Width = TextRenderer.MeasureText(text, Font, Size.Empty, Theme.Line).Width + 46;
+            Fit();
         }
+        private void Fit() { Width = TextRenderer.MeasureText(Text, Font, Size.Empty, Theme.Line).Width + Dpi.Px(46); }
+        protected override void ScaleControl(SizeF factor, BoundsSpecified specified) { base.ScaleControl(factor, specified); Fit(); }
         protected override void OnPaint(PaintEventArgs e)
         {
             Graphics g = e.Graphics;
@@ -470,13 +516,13 @@ namespace VietDang.Design
         protected override void OnLayout(LayoutEventArgs e)
         {
             base.OnLayout(e);
-            Radio.Location = new Point(12, (ClientSize.Height - Radio.Height) / 2);
-            int x = ClientSize.Width - 10;
+            Radio.Location = new Point(Dpi.Px(12), (ClientSize.Height - Radio.Height) / 2);
+            int x = ClientSize.Width - Dpi.Px(10);
             foreach (Control control in _right)
             {
                 x -= control.Width;
                 control.Location = new Point(x, (ClientSize.Height - control.Height) / 2);
-                x -= 6;
+                x -= Dpi.Px(6);
             }
         }
         protected override void OnPaint(PaintEventArgs e)
@@ -509,8 +555,8 @@ namespace VietDang.Design
         protected override void OnLayout(LayoutEventArgs e)
         {
             base.OnLayout(e);
-            int left = string.IsNullOrEmpty(_glyph) ? 10 : 32;
-            _inner.SetBounds(left, (ClientSize.Height - _inner.Height) / 2, Math.Max(0, ClientSize.Width - left - 10), _inner.Height);
+            int left = Dpi.Px(string.IsNullOrEmpty(_glyph) ? 10 : 32);
+            _inner.SetBounds(left, (ClientSize.Height - _inner.Height) / 2, Math.Max(0, ClientSize.Width - left - Dpi.Px(10)), _inner.Height);
         }
         protected override void OnPaint(PaintEventArgs e)
         {

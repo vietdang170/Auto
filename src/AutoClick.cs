@@ -82,15 +82,13 @@ namespace VietDang.AutoClick
             _embedded = embedded;
             try { _settings = initial ?? SettingsStore.Load(out _loadWarning, _settingsPath); _settings.Validate(); }
             catch (Exception ex) { _settings = new AppSettings(); _loadError = ex.Message; }
-            Text = "Auto Click";
+            Text = "AutoClick";
             ClientSize = new Size(840, _embedded ? 620 : 642);
             FormBorderStyle = FormBorderStyle.FixedSingle;
             MaximizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
             Font = Theme.Regular;
             BackColor = Theme.Window;
-            AutoScaleDimensions = new SizeF(96, 96);
-            AutoScaleMode = AutoScaleMode.Dpi;
             _appIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
             Icon = _appIcon;
             BuildLayout();
@@ -102,14 +100,15 @@ namespace VietDang.AutoClick
             _runner.Progress += delegate(long loops, int step) { Post(delegate { _loops = loops; _stepIndex = step; }); };
             _runner.Finished += delegate(RunResult result) { Post(delegate { FinishRun(result); }); };
             _progressTimer.Tick += delegate { UpdateProgress(); };
-            _trayMenu.Items.Add("Mở Auto Click", null, delegate { ShowApp(); });
+            _trayMenu.Items.Add("Mở AutoClick", null, delegate { ShowApp(); });
             _trayMenu.Items.Add("Dừng ngay", null, delegate { StopRun(); });
             _trayMenu.Items.Add("Thoát hẳn", null, delegate { ExitApp(); });
-            _tray = new NotifyIcon { Icon = _appIcon, Visible = !embedded, Text = "Auto Click: Sẵn sàng", ContextMenuStrip = _trayMenu };
+            _tray = new NotifyIcon { Icon = _appIcon, Visible = !embedded, Text = "AutoClick: Sẵn sàng", ContextMenuStrip = _trayMenu };
             _tray.DoubleClick += delegate { ShowApp(); };
             // Any dialog on this thread (message boxes, file pickers, the other module's dialogs) blocks the Start key.
             Application.EnterThreadModal += EnterModal;
             Application.LeaveThreadModal += LeaveModal;
+            Dpi.Fit(this);
         }
         private void EnterModal(object sender, EventArgs e) { _threadModal = true; }
         private void LeaveModal(object sender, EventArgs e) { _threadModal = false; }
@@ -133,7 +132,7 @@ namespace VietDang.AutoClick
             _editor.Controls.Add(edit);
 
             // Page header: what this tab does, plus the scenario picker and its actions.
-            Card header = Kit.PageHeader(Glyph.Mouse, "Tự động nhấp chuột", "Auto Click · Theo tọa độ và kịch bản");
+            Card header = Kit.PageHeader(Glyph.Mouse, "Tự động nhấp chuột", "AutoClick · Theo tọa độ và kịch bản");
             UiButton add = new UiButton("Thêm", Glyph.Add, ButtonKind.Secondary), duplicate = new UiButton("Nhân bản", Glyph.Copy, ButtonKind.Secondary);
             UiButton rename = new UiButton("Đổi tên", Glyph.Rename, ButtonKind.Secondary), delete = new UiButton("Xóa", Glyph.Delete, ButtonKind.Danger);
             header.AddHeader(delete); header.AddHeader(rename); header.AddHeader(duplicate); header.AddHeader(add); header.AddHeader(_scenarios);
@@ -233,7 +232,7 @@ namespace VietDang.AutoClick
             _start.Click += delegate { StartRun(false); };
             _trial.Click += delegate { StartRun(true); };
             root.Controls.Add(new Label { Text = "Thiết kế bởi VietDang · Zalo: 0974 318 666", Dock = DockStyle.Fill,
-                TextAlign = ContentAlignment.MiddleRight, Font = new Font("Segoe UI", 7.5f), ForeColor = Ui.Muted, Visible = !_embedded }, 0, 2);
+                TextAlign = ContentAlignment.MiddleRight, Font = Theme.Credit, ForeColor = Ui.Muted, Visible = !_embedded }, 0, 2);
         }
         private void BuildGrid()
         {
@@ -259,8 +258,7 @@ namespace VietDang.AutoClick
             _steps.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing;
             _steps.DefaultCellStyle.Font = Theme.Regular;
             // The grid does not scale its own row and column sizes with the form, so follow the screen DPI here.
-            float scale;
-            using (Graphics screen = Graphics.FromHwnd(IntPtr.Zero)) scale = screen.DpiX / 96f;
+            float scale = Dpi.Scale;
             _steps.ColumnHeadersHeight = (int)Math.Round(34 * scale);
             _steps.RowTemplate.Height = (int)Math.Round(38 * scale);
             string[] headers = { "STT", "Tọa độ X", "Tọa độ Y", "Nút chuột", "Thao tác", "Chờ sau (ms)", "Giữ lì (ms)", "Hành động" };
@@ -301,7 +299,7 @@ namespace VietDang.AutoClick
         }
         internal static void DrawMouse(Graphics g, Rectangle box, bool right, Color accent, Color outline)
         {
-            float scale = g.DpiX / 96f, w = 11 * scale, h = 16 * scale;
+            float scale = Theme.Scale(g), w = 11 * scale, h = 16 * scale;
             RectangleF body = new RectangleF(box.X + (box.Width - w) / 2f, box.Y + (box.Height - h) / 2f, w, h);
             float split = body.Y + h * 0.44f, middle = body.X + w / 2f;
             SmoothingMode previous = g.SmoothingMode;
@@ -344,7 +342,7 @@ namespace VietDang.AutoClick
             Graphics g = e.Graphics;
             g.SmoothingMode = SmoothingMode.None;
             Rectangle cell = e.CellBounds;
-            float scale = g.DpiX / 96f;
+            float scale = Theme.Scale(g);
             int column = e.ColumnIndex, pad = (int)(14 * scale);
             bool numeric = column == 1 || column == 2 || column == 5 || column == 6;
             TextFormatFlags flags = Theme.Line | TextFormatFlags.EndEllipsis | (numeric ? TextFormatFlags.Right : column == 7 ? TextFormatFlags.HorizontalCenter : TextFormatFlags.Left);
@@ -416,8 +414,8 @@ namespace VietDang.AutoClick
         {
             if (_initialized) return;
             _initialized = true;
-            if (_loadError != null) MessageBox.Show(this, "Không đọc được cài đặt cũ. Dữ liệu cũ vẫn được giữ cho đến khi bạn lưu thay đổi.\n" + _loadError, "Auto Click", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            if (_loadWarning != null) MessageBox.Show(this, _loadWarning, "Auto Click", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            if (_loadError != null) MessageBox.Show(this, "Không đọc được cài đặt cũ. Dữ liệu cũ vẫn được giữ cho đến khi bạn lưu thay đổi.\n" + _loadError, "AutoClick", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            if (_loadWarning != null) MessageBox.Show(this, _loadWarning, "AutoClick", MessageBoxButtons.OK, MessageBoxIcon.Information);
             if (_startCandidate != Keys.None || _stopCandidate != Keys.None) ApplyHotkeys(false);
             else { _keyStatus.ForeColor = Ui.Muted; _keyStatus.Text = "Bấm vào từng ô và nhấn phím muốn dùng (ví dụ F6, F7), rồi bấm Lưu phím tắt."; }
             UpdateKeysUi();
@@ -513,7 +511,7 @@ namespace VietDang.AutoClick
             if (_disposed) return true;
             _dirty = true;
             try { SettingsStore.Save(_settings, _settingsPath); _loadError = null; _dirty = false; return true; }
-            catch (Exception ex) { MessageBox.Show(this, "Chưa lưu được thay đổi:\n" + ex.Message, "Auto Click", MessageBoxButtons.OK, MessageBoxIcon.Error); return false; }
+            catch (Exception ex) { MessageBox.Show(this, "Chưa lưu được thay đổi:\n" + ex.Message, "AutoClick", MessageBoxButtons.OK, MessageBoxIcon.Error); return false; }
         }
         private void RefreshScenarios(int index)
         {
@@ -553,6 +551,7 @@ namespace VietDang.AutoClick
                 ok.Location = new Point(185, 68); cancel.Location = new Point(284, 68);
                 ok.DialogResult = DialogResult.OK; cancel.DialogResult = DialogResult.Cancel;
                 dialog.Controls.AddRange(new Control[] { name, ok, cancel }); dialog.AcceptButton = ok; dialog.CancelButton = cancel;
+                Dpi.Fit(dialog);
                 _modal = true;
                 try { return dialog.ShowDialog(this) == DialogResult.OK ? name.Text.Trim() : null; }
                 finally { _modal = false; }
@@ -608,7 +607,7 @@ namespace VietDang.AutoClick
             _modal = true;
             try
             {
-                if (MessageBox.Show(this, "Xóa kịch bản “" + Selected.Name + "” và toàn bộ tọa độ?", "Auto Click", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+                if (MessageBox.Show(this, "Xóa kịch bản “" + Selected.Name + "” và toàn bộ tọa độ?", "AutoClick", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
                 int index = _scenarios.SelectedIndex;
                 _settings.Scenarios.RemoveAt(index);
                 _settings.SelectedIndex = _settings.Scenarios.Count == 0 ? -1 : Math.Min(index, _settings.Scenarios.Count - 1);
@@ -664,7 +663,7 @@ namespace VietDang.AutoClick
         {
             Scenario scenario = Selected;
             if (scenario == null || scenario.Steps.Count == 0) return;
-            if (MessageBox.Show(this, "Xóa toàn bộ " + scenario.Steps.Count + " tọa độ của kịch bản “" + scenario.Name + "”?", "Auto Click",
+            if (MessageBox.Show(this, "Xóa toàn bộ " + scenario.Steps.Count + " tọa độ của kịch bản “" + scenario.Name + "”?", "AutoClick",
                 MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
             scenario.Steps.Clear();
             Save(); RefreshSteps();
@@ -685,7 +684,7 @@ namespace VietDang.AutoClick
         }
         private void DeleteStep(int index)
         {
-            if (MessageBox.Show(this, "Xóa tọa độ số " + (index + 1) + "?", "Auto Click", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+            if (MessageBox.Show(this, "Xóa tọa độ số " + (index + 1) + "?", "AutoClick", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
             Scenario scenario = Selected;
             if (scenario == null || index >= scenario.Steps.Count) return;
             scenario.Steps.RemoveAt(index);
@@ -782,7 +781,7 @@ namespace VietDang.AutoClick
                 _restoreAfterRun = _embedded ? TopLevelControl != null && TopLevelControl.Visible : Visible;
                 _runner.Start(run);
                 _runActive = true; _editor.Enabled = false; _start.Enabled = false; _trial.Enabled = false;
-                _tray.Text = "Auto Click: Đang chạy"; _progressTimer.Start();
+                _tray.Text = "AutoClick: Đang chạy"; _progressTimer.Start();
                 if (RunningChanged != null) RunningChanged(true);
                 HideApp();
             }
@@ -792,7 +791,7 @@ namespace VietDang.AutoClick
         {
             if (_picker != null) { _picker.DialogResult = DialogResult.Cancel; _picker.Close(); }
             try { _runner.Stop(); }
-            catch (Exception ex) { ShowApp(); MessageBox.Show(this, "Chưa nhả được chuột: " + ex.Message, "Auto Click", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+            catch (Exception ex) { ShowApp(); MessageBox.Show(this, "Chưa nhả được chuột: " + ex.Message, "AutoClick", MessageBoxButtons.OK, MessageBoxIcon.Error); }
             if (_runActive) _status.Text = "Đang dừng và nhả nút chuột…";
         }
         private void UpdateProgress()
@@ -808,12 +807,12 @@ namespace VietDang.AutoClick
         {
             _progressTimer.Stop(); _runActive = false;
             _editor.Enabled = true; _start.Enabled = true; _trial.Enabled = true;
-            _tray.Text = "Auto Click: Sẵn sàng";
+            _tray.Text = "AutoClick: Sẵn sàng";
             if (RunningChanged != null) RunningChanged(false);
             _status.Text = result.Error != null ? "Đã dừng do lỗi: " + result.Error :
                 (result.Stopped ? "Đã dừng ngay" : result.TimeLimit ? "Đã hết thời gian" : "Đã chạy xong") + " · " + result.Loops + " lượt hoàn tất.";
             if (_restoreAfterRun || result.Error != null) ShowApp();
-            if (result.Error != null) MessageBox.Show(this, result.Error, "Auto Click", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            if (result.Error != null) MessageBox.Show(this, result.Error, "AutoClick", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
 
@@ -829,12 +828,13 @@ namespace VietDang.AutoClick
         internal static readonly Color Muted = Theme.Muted;
         internal static Button Button(string text, int width) { return new Button { Text = text, Width = width, Height = 26, Cursor = Cursors.Hand, Margin = new Padding(3) }; }
         internal static Label Caption(string text, int width) { return new Label { Text = text, Width = width, Height = 25, TextAlign = ContentAlignment.MiddleLeft, Margin = new Padding(3) }; }
-        internal static Label Section(string text) { return new Label { Text = text, Dock = DockStyle.Fill, Margin = Padding.Empty, TextAlign = ContentAlignment.MiddleLeft, Font = new Font("Segoe UI", 9f, FontStyle.Bold), ForeColor = Color.FromArgb(51, 65, 85) }; }
+        internal static Label Section(string text) { return new Label { Text = text, Dock = DockStyle.Fill, Margin = Padding.Empty, TextAlign = ContentAlignment.MiddleLeft, Font = Theme.UiFont("Segoe UI", 9f, FontStyle.Bold), ForeColor = Color.FromArgb(51, 65, 85) }; }
         internal static FlowLayoutPanel Row() { return new FlowLayoutPanel { Dock = DockStyle.Fill, Margin = Padding.Empty, Padding = Padding.Empty, WrapContents = false }; }
+        // Callers add their controls, then call Dpi.Fit before showing it.
         internal static Form Dialog(string text, Size size)
         {
-            return new Form { Text = text, ClientSize = size, Font = new Font("Segoe UI", 9f), FormBorderStyle = FormBorderStyle.FixedDialog,
-                StartPosition = FormStartPosition.CenterParent, MaximizeBox = false, MinimizeBox = false, ShowInTaskbar = false, AutoScaleMode = AutoScaleMode.Dpi };
+            return new Form { Text = text, ClientSize = size, Font = Theme.Regular, FormBorderStyle = FormBorderStyle.FixedDialog,
+                StartPosition = FormStartPosition.CenterParent, MaximizeBox = false, MinimizeBox = false, ShowInTaskbar = false };
         }
     }
 
@@ -873,9 +873,9 @@ namespace VietDang.AutoClick
         { return new NumericUpDown { Minimum = min, Maximum = max, DecimalPlaces = places, Width = 190, Increment = places == 0 ? 1 : 0.1m }; }
         internal StepDialog(ClickStep step)
         {
-            Text = "Thiết lập tọa độ"; ClientSize = new Size(430, 305); Font = new Font("Segoe UI", 9f);
+            Text = "Thiết lập tọa độ"; ClientSize = new Size(430, 305); Font = Theme.Regular;
             StartPosition = FormStartPosition.CenterParent; FormBorderStyle = FormBorderStyle.FixedDialog;
-            MaximizeBox = false; MinimizeBox = false; ShowInTaskbar = false; AutoScaleMode = AutoScaleMode.Dpi;
+            MaximizeBox = false; MinimizeBox = false; ShowInTaskbar = false;
             _button.Items.AddRange(new object[] { "Chuột trái", "Chuột phải" });
             _action.Items.AddRange(new object[] { "Nhấp đơn", "Nhấp đúp", "Giữ chuột" });
             _x.Value = Math.Max(_x.Minimum, Math.Min(_x.Maximum, step.X));
@@ -901,6 +901,7 @@ namespace VietDang.AutoClick
                     Action = (ClickAction)_action.SelectedIndex, DelayMs = (int)_delay.Value, HoldMs = (int)_hold.Value };
                 DialogResult = DialogResult.OK; Close();
             };
+            Dpi.Fit(this);
         }
     }
 }

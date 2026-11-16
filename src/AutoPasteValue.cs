@@ -294,6 +294,8 @@ namespace AutoPasteValueApp
             _swapTimer.Tick += (sender, e) => { _swapTimer.Stop(); SyncClipboardWithForeground(); };
             UpdateStatusUI();
             UpdateHotkeyHint();
+            Dpi.Fit(this);
+            _lstExcludedApps.ItemHeight = Dpi.Px(34);
         }
 
         #region Icons
@@ -1159,8 +1161,6 @@ namespace AutoPasteValueApp
             using (Form picker = new Form())
             {
                 picker.Text = "Chọn ứng dụng đang mở";
-                picker.AutoScaleDimensions = new SizeF(96, 96);
-                picker.AutoScaleMode = AutoScaleMode.Dpi;
                 picker.ClientSize = new Size(460, 440);
                 picker.StartPosition = FormStartPosition.CenterParent;
                 picker.FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -1182,12 +1182,10 @@ namespace AutoPasteValueApp
                 }, 0, 0);
 
                 Frame frame = new Frame { Dock = DockStyle.Fill };
-                float scale;
-                using (Graphics screen = Graphics.FromHwnd(IntPtr.Zero)) scale = screen.DpiX / 96f;
                 ListBox list = new ListBox
                 {
                     Dock = DockStyle.Fill, BorderStyle = BorderStyle.None, IntegralHeight = false,
-                    DrawMode = DrawMode.OwnerDrawFixed, ItemHeight = (int)Math.Round(44 * scale), Font = Theme.Regular
+                    DrawMode = DrawMode.OwnerDrawFixed, Font = Theme.Regular
                 };
                 foreach (KeyValuePair<string, string> app in apps) list.Items.Add(app.Key);
                 list.DrawItem += (sender, e) =>
@@ -1195,7 +1193,7 @@ namespace AutoPasteValueApp
                     if (e.Index < 0) return;
                     bool selected = (e.State & DrawItemState.Selected) != 0;
                     Graphics g = e.Graphics;
-                    float s = g.DpiX / 96f;
+                    float s = Theme.Scale(g);
                     using (SolidBrush back = new SolidBrush(selected ? Theme.BlueSoft : Theme.Surface)) g.FillRectangle(back, e.Bounds);
                     using (Pen line = new Pen(Theme.Divider)) g.DrawLine(line, e.Bounds.Left, e.Bounds.Bottom - 1, e.Bounds.Right, e.Bounds.Bottom - 1);
                     int icon = (int)(40 * s), half = e.Bounds.Height / 2;
@@ -1234,6 +1232,8 @@ namespace AutoPasteValueApp
                 list.SelectedIndexChanged += (sender, e) => add.Enabled = list.SelectedIndex >= 0;
                 list.DoubleClick += (sender, e) => addSelected();
                 add.Click += (sender, e) => addSelected();
+                Dpi.Fit(picker);
+                list.ItemHeight = Dpi.Px(44); // Set after scaling, so it is scaled exactly once.
                 picker.ShowDialog(this);
             }
         }
@@ -1346,8 +1346,6 @@ namespace AutoPasteValueApp
         private void InitializeComponent()
         {
             this.Text = "AutoPasteValue";
-            this.AutoScaleDimensions = new SizeF(96, 96);
-            this.AutoScaleMode = AutoScaleMode.Dpi;
             this.ClientSize = new Size(840, _embedded ? 620 : 664);
             this.StartPosition = FormStartPosition.CenterScreen;
             this.FormBorderStyle = FormBorderStyle.FixedSingle;
@@ -1386,7 +1384,7 @@ namespace AutoPasteValueApp
                 AutoFit = false,
                 Height = 38,
                 Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom,
-                Font = new Font("Segoe UI Semibold", 10f)
+                Font = Theme.UiFont("Segoe UI Semibold", 10f)
             };
             _btnToggle.Click += (sender, e) => ToggleState();
             stateBody.Controls.Add(_lblStatus, 0, 0);
@@ -1469,15 +1467,13 @@ namespace AutoPasteValueApp
             excludeBody.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
 
             Frame frame = new Frame { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 12, 0) };
-            float scale;
-            using (Graphics screen = Graphics.FromHwnd(IntPtr.Zero)) scale = screen.DpiX / 96f;
+            // ItemHeight is set after the form is scaled (constructor), so it is scaled exactly once.
             _lstExcludedApps = new ListBox
             {
                 Dock = DockStyle.Fill,
                 BorderStyle = BorderStyle.None,
                 IntegralHeight = false,
                 DrawMode = DrawMode.OwnerDrawFixed,
-                ItemHeight = (int)Math.Round(34 * scale),
                 Font = Theme.Regular
             };
             _lstExcludedApps.DrawItem += DrawExcludedApp;
@@ -1526,7 +1522,7 @@ namespace AutoPasteValueApp
             bottom.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             _chkAutoStart = new CheckBox { Text = "Khởi động cùng Windows", AutoSize = true, Checked = _autoStart, Anchor = AnchorStyles.Left, Margin = Padding.Empty };
             _chkAutoStart.CheckedChanged += (sender, e) => SetAutoStartRegistry(_chkAutoStart.Checked);
-            Label credit = new Label { Text = "Thiết kế bởi VietDang · Zalo: 0974 318 666", AutoSize = true, Anchor = AnchorStyles.Right, Font = new Font("Segoe UI", 7.5f), ForeColor = Muted, Margin = new Padding(0, 0, 10, 0) };
+            Label credit = new Label { Text = "Thiết kế bởi VietDang · Zalo: 0974 318 666", AutoSize = true, Anchor = AnchorStyles.Right, Font = Theme.Credit, ForeColor = Muted, Margin = new Padding(0, 0, 10, 0) };
             _btnClose = new UiButton("Đóng", null, ButtonKind.Secondary) { Height = 32, MinimumFit = 90, Anchor = AnchorStyles.Right, Margin = new Padding(0, 0, 8, 0) };
             _btnClose.Click += (sender, e) => MinimizeToTray();
             _btnExit = new UiButton("Thoát hẳn", Glyph.Power, ButtonKind.Danger) { Height = 32, Anchor = AnchorStyles.Right, Margin = Padding.Empty };
@@ -1560,7 +1556,7 @@ namespace AutoPasteValueApp
             if (e.Index < 0) return;
             bool selected = (e.State & DrawItemState.Selected) != 0;
             Graphics g = e.Graphics;
-            float scale = g.DpiX / 96f;
+            float scale = Theme.Scale(g);
             using (SolidBrush back = new SolidBrush(selected ? Theme.BlueSoft : Theme.Surface)) g.FillRectangle(back, e.Bounds);
             using (Pen line = new Pen(Theme.Divider)) g.DrawLine(line, e.Bounds.Left, e.Bounds.Bottom - 1, e.Bounds.Right, e.Bounds.Bottom - 1);
             int icon = (int)(36 * scale);
@@ -1575,8 +1571,8 @@ namespace AutoPasteValueApp
         {
             _contextMenu = new ContextMenuStrip();
 
-            _menuItemStatus = new ToolStripMenuItem("Trạng thái: ĐANG BẬT") { Enabled = false, Font = new Font("Segoe UI", 9f, FontStyle.Bold) };
-            _menuItemToggle = new ToolStripMenuItem("Bật / Tắt") { Font = new Font("Segoe UI", 9f, FontStyle.Bold) };
+            _menuItemStatus = new ToolStripMenuItem("Trạng thái: ĐANG BẬT") { Enabled = false, Font = Theme.UiFont("Segoe UI", 9f, FontStyle.Bold) };
+            _menuItemToggle = new ToolStripMenuItem("Bật / Tắt") { Font = Theme.UiFont("Segoe UI", 9f, FontStyle.Bold) };
             _menuItemToggle.Click += (s, e) => ToggleState();
 
             _menuItemAutoStart = new ToolStripMenuItem("Khởi động cùng Windows") { CheckOnClick = true, Checked = _autoStart };

@@ -420,7 +420,6 @@ namespace VietDang.VTool
         internal UpdateDialog(ReleaseInfo release)
         {
             Text = "Cập nhật " + Program.AppName;
-            AutoScaleDimensions = new SizeF(96, 96); AutoScaleMode = AutoScaleMode.Dpi;
             ClientSize = new Size(420, 136);
             StartPosition = FormStartPosition.CenterScreen;
             FormBorderStyle = FormBorderStyle.FixedDialog; MaximizeBox = false; MinimizeBox = false;
@@ -438,6 +437,7 @@ namespace VietDang.VTool
             layout.Controls.Add(buttons, 0, 1);
             Controls.Add(layout);
             AcceptButton = install; CancelButton = skip;
+            Dpi.Fit(this);
         }
     }
 }

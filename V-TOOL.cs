@@ -45,7 +45,7 @@ namespace VietDang.VTool
                 {
                     if (!pasteAvailable || !clickAvailable)
                     {
-                        MessageBox.Show("Hãy thoát hẳn Auto, AutoPasteValue hoặc Auto Click cũ ở khay hệ thống, rồi mở " + AppName + ".", AppName);
+                        MessageBox.Show("Hãy thoát hẳn Auto, AutoPasteValue hoặc AutoClick cũ ở khay hệ thống, rồi mở " + AppName + ".", AppName);
                         return;
                     }
                     Application.EnableVisualStyles();
@@ -139,6 +139,8 @@ namespace VietDang.VTool
     internal static class Startup
     {
         private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+        // Task Manager > Startup apps keeps its own on/off flag per Run entry; an odd first byte means switched off there.
+        private const string ApprovedKey = @"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
         private const string ValueName = "V-TOOL";
         private static readonly string[] LegacyNames = { "Auto", "AutoPasteValue" };
         private static string Command { get { return "\"" + Application.ExecutablePath + "\" /minimized"; } }
@@ -148,7 +150,7 @@ namespace VietDang.VTool
             return false;
         }
         private static void DeleteLegacy(RegistryKey run) { foreach (string name in LegacyNames) run.DeleteValue(name, false); }
-        internal static bool IsEnabled()
+        private static bool HasEntry()
         {
             try
             {
@@ -157,6 +159,21 @@ namespace VietDang.VTool
             }
             catch (Exception) { return false; }
         }
+        // The entry is there but switched off in Task Manager, so Windows skips it at sign-in.
+        internal static bool DisabledInTaskManager()
+        {
+            try
+            {
+                using (RegistryKey approved = Registry.CurrentUser.OpenSubKey(ApprovedKey))
+                {
+                    byte[] flag = approved == null ? null : approved.GetValue(ValueName) as byte[];
+                    return HasEntry() && flag != null && flag.Length > 0 && (flag[0] & 1) == 1;
+                }
+            }
+            catch (Exception) { return false; }
+        }
+        // What Windows will really do at the next sign-in.
+        internal static bool IsEnabled() { return HasEntry() && !DisabledInTaskManager(); }
         internal static void Set(bool enabled)
         {
             using (RegistryKey run = Registry.CurrentUser.CreateSubKey(RunKey))
@@ -165,6 +182,9 @@ namespace VietDang.VTool
                 else run.DeleteValue(ValueName, false);
                 DeleteLegacy(run);
             }
+            // Switching it on here also clears an "off" left in Task Manager; without its flag Windows runs the entry.
+            using (RegistryKey approved = Registry.CurrentUser.OpenSubKey(ApprovedKey, true))
+                if (approved != null) approved.DeleteValue(ValueName, false);
         }
         // Moves an older entry to V-TOOL's own name and keeps the path current if the exe was moved or renamed.
         internal static void Refresh()
@@ -180,7 +200,7 @@ namespace VietDang.VTool
         }
     }
 
-    // Before the rename the app was called Auto. Its settings key and its Auto Click scripts are moved once to the
+    // Before the rename the app was called Auto. Its settings key and its AutoClick scripts are moved once to the
     // V-TOOL names, and the update downloads it kept are removed.
     internal static class Legacy
     {
@@ -232,7 +252,7 @@ namespace VietDang.VTool
         }
     }
 
-    // The app's own preferences, separate from the AutoPasteValue and Auto Click settings.
+    // The app's own preferences, separate from the AutoPasteValue and AutoClick settings.
     internal static class UpdateSettings
     {
         private const string Key = Program.SettingsKey;
@@ -261,9 +281,10 @@ namespace VietDang.VTool
 
     internal sealed class MainWindow : Form
     {
-        private const int NavWidth = 184, PageWidth = 840, PageHeight = 620;
+        // Design sizes at 100 %. A page keeps at least PageMin* and scrolls in a smaller window.
+        private const int NavWidth = 184, PageWidth = 840, PageHeight = 620, PageMinWidth = 840, PageMinHeight = 540, SettingsMinHeight = 620;
         private const string Author = "Thiết kế bởi VietDang\nZalo: 0974 318 666";
-        // Page order follows the sidebar: Auto Click, AutoPasteValue, Add-in Office, then Settings.
+        // Page order follows the sidebar: AutoClick, AutoPasteValue, Add-in Office, then Settings.
         internal const int ClickPage = 0, PastePage = 1, AddinPage = 2, SettingsPage = 3;
         private readonly PasteForm _paste;
         private readonly ClickForm _click;
@@ -277,7 +298,8 @@ namespace VietDang.VTool
         private readonly CheckBox _updateBox = new ToggleSwitch { AccessibleName = "Tự động kiểm tra cập nhật hằng ngày", Anchor = AnchorStyles.Right };
         private int _lastTrayToggle;
         private readonly UiButton _checkButton = new UiButton("Kiểm tra ngay", Glyph.Sync, ButtonKind.Secondary) { Height = 32, Anchor = AnchorStyles.Right };
-        private Label _updateStatus;
+        private Label _updateStatus, _startupNote;
+        private bool _checkingStartup;
         private readonly System.Windows.Forms.Timer _updateTimer = new System.Windows.Forms.Timer();
         private ReleaseInfo _ready;
         private bool _checking, _offering, _offerAfterRun, _startReported;
@@ -288,7 +310,8 @@ namespace VietDang.VTool
         private readonly NotifyIcon _tray;
         private readonly Icon _iconOn, _iconOff;
         private int _selected;
-        private bool _exit, _disposed, _modulesInitialized, _clickRunning, _syncingStartup;
+        private bool _exit, _disposed, _modulesInitialized, _clickRunning, _syncingStartup, _placed;
+        private FormWindowState _shownState = FormWindowState.Normal;
 
         internal MainWindow() : this(null, null, false) { }
         // isolated: integration checks must not touch the user's registry, global hotkeys or clipboard.
@@ -297,9 +320,9 @@ namespace VietDang.VTool
             _isolated = isolated;
             Text = Program.AppName;
             Font = Theme.Regular; BackColor = Theme.Window;
-            FormBorderStyle = FormBorderStyle.FixedSingle; MaximizeBox = false;
-            StartPosition = FormStartPosition.CenterScreen;
-            AutoScaleDimensions = new SizeF(96, 96); AutoScaleMode = AutoScaleMode.Dpi;
+            // Resizable and maximizable; the first show fits it to the screen it opens on (PlaceOnScreen).
+            FormBorderStyle = FormBorderStyle.Sizable; MaximizeBox = true;
+            StartPosition = FormStartPosition.Manual;
             ClientSize = new Size(NavWidth + PageWidth, PageHeight);
             Boot.Mark("Bắt đầu tạo cửa sổ");
             _iconOn = PasteForm.CreateTrayIcon(true, 32); _iconOff = PasteForm.CreateTrayIcon(false, 32);
@@ -308,7 +331,7 @@ namespace VietDang.VTool
             _paste = new PasteForm(true, isolated);
             Boot.Mark("Tạo trang AutoPasteValue");
             _click = new ClickForm(clickSettings, settingsPath, true);
-            Boot.Mark("Tạo trang Auto Click");
+            Boot.Mark("Tạo trang AutoClick");
 
             // The fill panel goes in first so the navigation strip is docked before it.
             Controls.Add(_host); Controls.Add(_nav);
@@ -382,9 +405,18 @@ namespace VietDang.VTool
             };
             _navItems[0].Checked = true;
             UpdateTray();
+            // Everything is built: scale it to the screen once, then allow the window to shrink below the design size,
+            // where each page scrolls instead of squeezing its cards together.
+            Dpi.Fit(this);
+            for (int i = 0; i < _pages.Length; i++)
+            {
+                _pages[i].AutoScroll = true;
+                _pages[i].AutoScrollMinSize = Dpi.Px(new Size(PageMinWidth, i == SettingsPage ? SettingsMinHeight : PageMinHeight));
+            }
+            MinimumSize = SizeFromClientSize(Dpi.Px(new Size(NavWidth + 480, 400)));
             // Both modules need window handles now: clipboard listening and hotkeys work while V-TOOL stays in the tray.
             IntPtr pasteHandle = _paste.Handle, clickHandle = _click.Handle;
-            Boot.Mark("Tạo handle AutoPasteValue / Auto Click");
+            Boot.Mark("Tạo handle AutoPasteValue / AutoClick");
         }
         private static void Embed(Form module, Panel page)
         {
@@ -395,7 +427,7 @@ namespace VietDang.VTool
         private void BuildNavigation()
         {
             _nav.Paint += delegate(object sender, PaintEventArgs e) { using (Pen line = new Pen(Theme.Border)) e.Graphics.DrawLine(line, _nav.Width - 1, 0, _nav.Width - 1, _nav.Height); };
-            string[] titles = { "Auto Click", "AutoPasteValue", "Add-in Office", "Cài đặt" };
+            string[] titles = { "AutoClick", "AutoPasteValue", "Add-in Office", "Cài đặt" };
             string[] glyphs = { Glyph.Mouse, Glyph.Paste, Glyph.Puzzle, Glyph.Settings };
             for (int i = 0; i < titles.Length; i++)
             {
@@ -406,8 +438,7 @@ namespace VietDang.VTool
                 _nav.Controls.Add(item);
             }
             // Author line in the bottom-left corner; it can be selected and copied.
-            Font small = new Font("Segoe UI", 7.5f);
-            TextBox author = Kit.CopyText(Author, small, Theme.Faint, Theme.Surface);
+            TextBox author = Kit.CopyText(Author, Theme.Credit, Theme.Faint, Theme.Surface);
             author.Dock = DockStyle.Bottom;
             Panel corner = new Panel { Dock = DockStyle.Bottom, Height = 50, Padding = new Padding(18, 0, 0, 12), BackColor = Theme.Surface };
             corner.Controls.Add(author);
@@ -434,6 +465,7 @@ namespace VietDang.VTool
             {
                 // Word or Excel may have been installed or removed outside V-TOOL since the tab was last seen.
                 if (index == AddinPage) _addins.RefreshState();
+                if (index == SettingsPage) RefreshStartupNote();
                 _pages[index].Visible = true;
                 for (int i = 0; i < _pages.Length; i++) if (i != index) _pages[i].Visible = false;
             });
@@ -454,13 +486,15 @@ namespace VietDang.VTool
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 68));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 122));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 176));
+            // The cards keep their height in a large window; the space left over stays below them.
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 230));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 0));
             layout.Controls.Add(Kit.PageHeader(Glyph.Settings, "Cài đặt", ""), 0, 0);
 
             Card startup = new Card(Glyph.Power, "Khởi động cùng hệ thống") { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 10) };
-            startup.Controls.Add(SettingRow("Mở " + Program.AppName + " khi đăng nhập Windows",
-                Program.AppName + " tự mở, thu nhỏ ở khay hệ thống mỗi khi bạn đăng nhập. Phím tắt và AutoPasteValue hoạt động ngay.", _startupBox));
+            TableLayoutPanel startupRow = SettingRow("Mở " + Program.AppName + " khi đăng nhập Windows", StartupHint, _startupBox);
+            _startupNote = (Label)startupRow.GetControlFromPosition(0, 1);
+            startup.Controls.Add(startupRow);
             layout.Controls.Add(startup, 0, 1);
 
             Card update = new Card(Glyph.Sync, "Cập nhật phần mềm") { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 10) };
@@ -570,6 +604,39 @@ namespace VietDang.VTool
             _syncingStartup = true;
             try { _startupBox.Checked = actual; _startupItem.Checked = actual; }
             finally { _syncingStartup = false; }
+            RefreshStartupNote();
+        }
+        private const string StartupHint = Program.AppName + " tự mở, thu nhỏ ở khay hệ thống mỗi khi bạn đăng nhập. Phím tắt và AutoPasteValue hoạt động ngay.";
+        // Says when Windows will not open V-TOOL at sign-in because it was switched off in Task Manager. The registry is
+        // read off the UI thread.
+        private void RefreshStartupNote()
+        {
+            if (_isolated || _startupNote == null || _checkingStartup) return;
+            _checkingStartup = true;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                string text = StartupHint;
+                Color color = Theme.Muted;
+                if (Startup.DisabledInTaskManager())
+                {
+                    text = "Đang bị tắt trong Task Manager › Ứng dụng khởi động nên không tự mở. Bật công tắc bên cạnh để mở lại.";
+                    color = Theme.Amber;
+                }
+                // Task Manager may have changed it while V-TOOL was running.
+                bool enabled = Startup.IsEnabled();
+                try
+                {
+                    BeginInvoke(new Action(delegate
+                    {
+                        _checkingStartup = false;
+                        _startupNote.Text = text; _startupNote.ForeColor = color;
+                        _syncingStartup = true;
+                        try { _startupBox.Checked = enabled; _startupItem.Checked = enabled; }
+                        finally { _syncingStartup = false; }
+                    }));
+                }
+                catch (InvalidOperationException) { _checkingStartup = false; }
+            });
         }
         // A grey icon means copies keep their formatting, exactly like the old AutoPasteValue tray icon.
         private void UpdateTray()
@@ -578,7 +645,7 @@ namespace VietDang.VTool
             bool pasting = _paste.PasteEnabled;
             _pasteToggle.Checked = pasting;
             _tray.Icon = pasting ? _iconOn : _iconOff; Icon = pasting ? _iconOn : _iconOff;
-            _tray.Text = _clickRunning ? Program.AppName + ": Auto Click đang chạy" : pasting ? "AutoPasteValue ĐANG BẬT · nhấp để tắt" : "AutoPasteValue ĐANG TẮT · nhấp để bật";
+            _tray.Text = _clickRunning ? Program.AppName + ": AutoClick đang chạy" : pasting ? "AutoPasteValue ĐANG BẬT · nhấp để tắt" : "AutoPasteValue ĐANG TẮT · nhấp để bật";
         }
         protected override void OnShown(EventArgs e)
         {
@@ -588,7 +655,7 @@ namespace VietDang.VTool
             Boot.Mark("Chuẩn bị sẵn các tab");
             if (!_isolated) Updates.CleanUp();
             InitializeModules();
-            Boot.Mark("Nạp kịch bản + phím tắt Auto Click");
+            Boot.Mark("Nạp kịch bản + phím tắt AutoClick");
             BeginInvoke(new Action(ReportStarted));
         }
         protected override void OnActivated(EventArgs e)
@@ -606,7 +673,67 @@ namespace VietDang.VTool
         {
             if (_disposed) return;
             _navItems[Math.Max(0, Math.Min(index, _navItems.Length - 1))].Checked = true;
-            Show(); WindowState = FormWindowState.Normal; Activate();
+            Show();
+            // Back from the taskbar the way it was left: maximized stays maximized.
+            if (WindowState == FormWindowState.Minimized) WindowState = _shownState;
+            Activate();
+        }
+        protected override void OnLoad(EventArgs e)
+        {
+            base.OnLoad(e);
+            PlaceOnScreen();
+        }
+        // First show: the size the window had last time (or the design size), never larger than the working area of the
+        // screen it opens on, centred there. A 125 % or 150 % laptop screen is often smaller than the scaled design.
+        private void PlaceOnScreen()
+        {
+            Rectangle work = Screen.FromPoint(Cursor.Position).WorkingArea;
+            Size size = Size;
+            bool maximized = false;
+            if (!_isolated)
+            {
+                try
+                {
+                    using (RegistryKey key = Registry.CurrentUser.OpenSubKey(Program.SettingsKey))
+                    {
+                        int width = key == null ? 0 : Convert.ToInt32(key.GetValue("WindowWidth", 0));
+                        int height = key == null ? 0 : Convert.ToInt32(key.GetValue("WindowHeight", 0));
+                        if (width > 0 && height > 0) size = Dpi.Px(new Size(width, height));
+                        maximized = key != null && Convert.ToInt32(key.GetValue("WindowMaximized", 0)) == 1;
+                    }
+                }
+                catch (Exception) { }
+            }
+            size = new Size(Math.Max(MinimumSize.Width, Math.Min(size.Width, work.Width)), Math.Max(MinimumSize.Height, Math.Min(size.Height, work.Height)));
+            Bounds = new Rectangle(work.Left + Math.Max(0, (work.Width - size.Width) / 2), work.Top + Math.Max(0, (work.Height - size.Height) / 2), size.Width, size.Height);
+            if (maximized) WindowState = FormWindowState.Maximized;
+            _placed = true;
+        }
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            if (WindowState != FormWindowState.Minimized) _shownState = WindowState;
+        }
+        protected override void OnVisibleChanged(EventArgs e)
+        {
+            base.OnVisibleChanged(e);
+            if (!Visible) RememberPlacement();
+        }
+        // Stored at 100 %, so the next start fits a screen whose scale changed in between.
+        private void RememberPlacement()
+        {
+            if (_isolated || !_placed || !IsHandleCreated) return;
+            Rectangle normal = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(Program.SettingsKey))
+                {
+                    key.SetValue("WindowWidth", (int)Math.Round(normal.Width / Dpi.Scale), RegistryValueKind.DWord);
+                    key.SetValue("WindowHeight", (int)Math.Round(normal.Height / Dpi.Scale), RegistryValueKind.DWord);
+                    key.SetValue("WindowMaximized", _shownState == FormWindowState.Maximized ? 1 : 0, RegistryValueKind.DWord);
+                }
+            }
+            catch (Exception) { }
         }
         internal void ExitApp() { _exit = true; Close(); }
 
@@ -704,6 +831,7 @@ namespace VietDang.VTool
             bool exiting = _exit || e.CloseReason != CloseReason.UserClosing;
             if (!_click.SaveForClose(exiting)) { _exit = false; Updates.PendingInstall = null; e.Cancel = true; ShowPage(ClickPage); return; }
             if (!exiting) { e.Cancel = true; Hide(); return; }
+            if (Visible) RememberPlacement();
             base.OnFormClosing(e);
         }
         protected override void Dispose(bool disposing)
@@ -791,7 +919,6 @@ namespace VietDang.VTool
         internal QrDialog(Bitmap image)
         {
             Text = "Ủng hộ tác giả";
-            AutoScaleDimensions = new SizeF(96, 96); AutoScaleMode = AutoScaleMode.Dpi;
             ClientSize = new Size(380, 470);
             StartPosition = FormStartPosition.CenterParent;
             FormBorderStyle = FormBorderStyle.FixedDialog; MaximizeBox = false; MinimizeBox = false; ShowInTaskbar = false;
@@ -809,6 +936,7 @@ namespace VietDang.VTool
             layout.Controls.Add(close, 0, 2);
             Controls.Add(layout);
             CancelButton = close;
+            Dpi.Fit(this);
         }
     }
 }

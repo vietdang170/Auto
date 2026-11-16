@@ -384,9 +384,7 @@ namespace VietDang.VTool
         {
             Addin = addin;
             AddTitleBadge(_state);
-            float scale;
-            using (Graphics screen = Graphics.FromHwnd(IntPtr.Zero)) scale = screen.DpiX / 96f;
-            TitleIcon = AppIcons.ForProgram(addin.ProcessName + ".EXE", (int)Math.Round(20 * scale));
+            TitleIcon = AppIcons.ForProgram(addin.ProcessName + ".EXE", Dpi.Px(20));
             _layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2, Margin = Padding.Empty };
             _layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             _layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));

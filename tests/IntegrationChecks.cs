@@ -41,6 +41,26 @@ namespace VietDang.VTool
                     }
                     return 0;
                 }
+                if (args.Length == 2 && args[0] == "--scaled-preview")
+                {
+                    // Must come before anything touches Theme: its fonts are created once with this scale.
+                    VietDang.Design.Dpi.Simulated = float.Parse(args[1], System.Globalization.CultureInfo.InvariantCulture);
+                    CheckLayouts();
+                    Console.WriteLine("PASS: " + _checks + " layout checks at " + args[1] + "x.");
+                    return 0;
+                }
+                CheckLayouts();
+                foreach (string scale in new string[] { "1.25", "1.5" })
+                {
+                    ProcessStartInfo scaled = new ProcessStartInfo(Assembly.GetExecutingAssembly().Location, "--scaled-preview " + scale)
+                        { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true };
+                    using (Process child = Process.Start(scaled))
+                    {
+                        string errors = child.StandardError.ReadToEnd();
+                        if (!child.WaitForExit(30000)) { child.Kill(); throw new Exception("layout check at " + scale + "x timed out"); }
+                        Check(child.ExitCode == 0, "layout fits at " + scale + "x screen scale\n" + errors);
+                    }
+                }
                 RunChecks();
                 RunUpdateChecks();
                 RunAddinChecks();
@@ -48,6 +68,89 @@ namespace VietDang.VTool
                 return 0;
             }
             catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
+        }
+        private static void Settle(int milliseconds)
+        {
+            Stopwatch wait = Stopwatch.StartNew();
+            while (wait.ElapsedMilliseconds < milliseconds) { Application.DoEvents(); System.Threading.Thread.Sleep(10); }
+        }
+        private static string Describe(Control control)
+        {
+            string text = control.Text;
+            return control.GetType().Name + (string.IsNullOrEmpty(text) ? "" : " \"" + (text.Length > 30 ? text.Substring(0, 30) + "…" : text) + "\"");
+        }
+        // Nothing may stick out of its parent and no fixed text may be cut short with "…".
+        private static void CheckInside(Control parent, List<string> problems)
+        {
+            ScrollableControl scroll = parent as ScrollableControl;
+            Rectangle area = scroll != null && scroll.AutoScroll ? scroll.DisplayRectangle : parent.ClientRectangle;
+            foreach (Control control in parent.Controls)
+            {
+                if (!control.Visible) continue;
+                Rectangle bounds = control.Bounds;
+                bounds.Inflate(-1, -1);
+                if (!area.Contains(bounds)) problems.Add(Describe(control) + " " + control.Bounds + " sticks out of " + Describe(parent) + " " + area);
+                Label label = control as Label;
+                if (label != null && label.AutoEllipsis && !label.AutoSize && label.Text.Length > 0 &&
+                    TextRenderer.MeasureText(label.Text, label.Font, Size.Empty, TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix).Width > label.ClientSize.Width)
+                    problems.Add(Describe(label) + " is cut short (" + label.ClientSize.Width + " px wide)");
+                DataGridView grid = control as DataGridView;
+                if (grid != null && grid.Columns.GetColumnsWidth(DataGridViewElementStates.Visible) > grid.ClientSize.Width)
+                    problems.Add("the coordinate grid needs sideways scrolling");
+                if (!(control is DataGridView || control is ListBox || control is UpDownBase || control is ComboBox || control is TextBoxBase)) CheckInside(control, problems);
+            }
+        }
+        // Builds the window at the current (or simulated) screen scale and checks every page at three window sizes: as it
+        // opens, a 1366 x 768 laptop screen, and a large 1920 x 1080 screen. Each case is saved as a preview picture.
+        private static void CheckLayouts()
+        {
+            float simulated = VietDang.Design.Dpi.Simulated;
+            string tag = Math.Abs(simulated - 1f) < 0.01f ? "" : "." + (int)Math.Round(simulated * 100);
+            string directory = Path.Combine(Path.GetTempPath(), "V-TOOL.Layout." + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(directory);
+            try
+            {
+                string settingsPath = Path.Combine(directory, "autoclick.xml");
+                AppSettings settings = new AppSettings { SelectedIndex = 0 };
+                Scenario first = new Scenario { Name = "Kịch bản mẫu" };
+                first.Steps.Add(new ClickStep { X = 450, Y = 250, DelayMs = 750 });
+                settings.Scenarios.Add(first);
+                SettingsStore.Save(settings, settingsPath);
+                using (MainWindow form = new MainWindow(null, settingsPath, true))
+                {
+                    form.ShowInTaskbar = false;
+                    form.Show(); form.Location = new Point(-20000, -20000); Application.DoEvents();
+                    Check(form.FormBorderStyle == FormBorderStyle.Sizable && form.MaximizeBox, "the window can be resized and maximized");
+                    Rectangle work = Screen.PrimaryScreen.WorkingArea;
+                    Check(form.Width <= work.Width && form.Height <= work.Height, "the window opens no larger than the screen");
+                    RadioButton[] navigation = (RadioButton[])Field(form, "_navItems");
+                    Panel[] pages = (Panel[])Field(form, "_pages");
+                    string[] names = { "Click", "Paste", "Addin", "Settings" };
+                    Size[] sizes = { form.Size, new Size(1366, 728), new Size(1920, 1040) };
+                    string[] sizeNames = { "", ".small", ".large" };
+                    for (int s = 0; s < sizes.Length; s++)
+                    {
+                        form.Size = sizes[s];
+                        for (int i = 0; i < 4; i++)
+                        {
+                            navigation[i].Checked = true;
+                            Settle(300);
+                            List<string> problems = new List<string>();
+                            CheckInside(pages[i], problems);
+                            string name = names[i] + tag + sizeNames[s];
+                            if (tag.Length > 0 || s > 0)
+                                using (Bitmap bitmap = new Bitmap(form.Width, form.Height))
+                                {
+                                    form.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
+                                    bitmap.Save(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "V-TOOL." + name + ".preview.png"));
+                                }
+                            Check(problems.Count == 0, name + " " + form.ClientSize + ": " + string.Join("; ", problems.ToArray()));
+                        }
+                    }
+                    ExitFromTray(form);
+                }
+            }
+            finally { Directory.Delete(directory, true); }
         }
         // Installs and removes both add-ins in a throw-away folder and registry key, from zips made here (no network, no real Office).
         private static void RunAddinChecks()
@@ -163,7 +266,15 @@ namespace VietDang.VTool
             Check(Updates.FindDigest(page, "V-TOOL.exe") == hash && Updates.FindDigest("<p>no assets</p>", "V-TOOL.exe") == null, "the checksum is also read from the release page when the API is busy");
             // The exe built next to the tests must be accepted by the updater (assembly V-TOOL, same version).
             string built = Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)), "V-TOOL.exe");
-            Check(File.Exists(built) && Updates.IsValidPackage(built, Updates.Sha256(built), Updates.Current), "the freshly built V-TOOL.exe passes the updater's own check");
+            // Just after the build the antivirus may still be scanning the new exe and hold it for a moment.
+            bool valid = false;
+            for (int attempt = 0; attempt < 20 && !valid; attempt++)
+            {
+                try { valid = File.Exists(built) && Updates.IsValidPackage(built, Updates.Sha256(built), Updates.Current); }
+                catch (IOException) { }
+                if (!valid) System.Threading.Thread.Sleep(500);
+            }
+            Check(valid, "the freshly built V-TOOL.exe passes the updater's own check");
             Bitmap qr = Donation.LoadQr();
             Check(qr != null && qr.Width == 296 && qr.Height == 296, "the donation QR code is built into the app");
             qr.Dispose();
@@ -210,7 +321,7 @@ namespace VietDang.VTool
                     Check(navigation[0].Left == navigation[3].Left && navigation[0].Top < navigation[1].Top && navigation[1].Top < navigation[2].Top && navigation[2].Top < navigation[3].Top, "navigation items are stacked vertically");
                     Form paste = (Form)Field(form, "_paste"), click = (Form)Field(form, "_click");
                     Check(!paste.TopLevel && !click.TopLevel && click.Parent == pages[MainWindow.ClickPage] && paste.Parent == pages[MainWindow.PastePage], "both modules run inside one window");
-                    Check(navigation[MainWindow.ClickPage].Text == "Auto Click" && navigation[MainWindow.PastePage].Text == "AutoPasteValue", "navigation order matches the pages");
+                    Check(navigation[MainWindow.ClickPage].Text == "AutoClick" && navigation[MainWindow.PastePage].Text == "AutoPasteValue", "navigation order matches the pages");
                     Check(!((NotifyIcon)Field(paste, "_notifyIcon")).Visible && !((NotifyIcon)Field(click, "_tray")).Visible && ((NotifyIcon)Field(form, "_tray")).Visible, "only one tray icon is visible");
                     Size fixedSize = form.Size;
                     for (int i = 0; i < 4; i++)
