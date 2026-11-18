@@ -167,15 +167,16 @@ namespace VietDang.VTool
                 Check(ExcelAddin.PathOf("/R \"C:\\a b\\vtool.xlam\"") == @"C:\a b\vtool.xlam" && ExcelAddin.PathOf("\"C:\\x.xlam\"") == @"C:\x.xlam", "Excel add-in entries are read with or without /R");
 
                 string zip = Path.Combine(folder, "xlam.zip"), files = Path.Combine(folder, "xlam");
-                MakeZip(zip, "xlam/vtool.xlam", "xlam/VNFastSearch.dll", "xlam/Vietnamese.dic", "xlam/setup.cmd");
-                OfficeAddin.Extract(zip, excel.Files, files);
-                Check(File.Exists(Path.Combine(files, "vtool.xlam")) && File.Exists(Path.Combine(files, "VNFastSearch.dll")) && File.Exists(Path.Combine(files, "Vietnamese.dic"))
-                    && !File.Exists(Path.Combine(files, "setup.cmd")), "only the add-in files are taken from the zip, from any subfolder");
+                MakeZip(zip, "xlam/vtool.xlam", "xlam/VNFastSearch.dll", "xlam/Vietnamese.dic", "xlam/VHighlight.dll", "xlam/setup.cmd", "xlam/sub/");
+                List<string> taken = OfficeAddin.Extract(zip, excel.MainFile, files);
+                Check(taken.Count == 5 && File.Exists(Path.Combine(files, "vtool.xlam")) && File.Exists(Path.Combine(files, "VNFastSearch.dll")) && File.Exists(Path.Combine(files, "Vietnamese.dic"))
+                    && File.Exists(Path.Combine(files, "VHighlight.dll")) && File.Exists(Path.Combine(files, "setup.cmd")),
+                    "every file in the zip is taken, setup.cmd included, from any subfolder");
                 string broken = Path.Combine(folder, "broken.zip");
-                MakeZip(broken, "vtool.xlam");
+                MakeZip(broken, "VNFastSearch.dll", "Vietnamese.dic");
                 bool refused = false;
-                try { OfficeAddin.Extract(broken, excel.Files, Path.Combine(folder, "broken")); } catch (InvalidDataException) { refused = true; }
-                Check(refused, "a zip without every add-in file is refused");
+                try { OfficeAddin.Extract(broken, excel.MainFile, Path.Combine(folder, "broken")); } catch (InvalidDataException) { refused = true; }
+                Check(refused, "a zip without the add-in itself is refused");
 
                 // Excel already lists other add-ins, and an old read-only vtool.xlam elsewhere, ticked and unticked.
                 string excelKey = @"Software\Microsoft\Office\16.0\Excel";
@@ -200,7 +201,19 @@ namespace VietDang.VTool
                     Check(manager.GetValueNames().Length == 0, "the old unticked V-TOOL entry is removed");
                 using (RegistryKey trust = root.OpenSubKey(excelKey + @"\Security\Trusted Locations\LocationVTool"))
                     Check(trust != null && (string)trust.GetValue("Path") == excel.InstallFolder(env) + "\\" && (int)trust.GetValue("AllowSubfolders") == 1, "the add-in folder becomes a trusted location");
-                Check(excel.State(env) == AddinState.Installed && File.Exists(Path.Combine(excel.InstallFolder(env), "VNFastSearch.dll")), "Excel add-in is reported installed");
+                Check(excel.State(env) == AddinState.Installed && File.Exists(Path.Combine(excel.InstallFolder(env), "VNFastSearch.dll"))
+                    && File.Exists(Path.Combine(excel.InstallFolder(env), "VHighlight.dll")) && File.Exists(Path.Combine(excel.InstallFolder(env), "setup.cmd"))
+                    && excel.InstalledFiles(env).Count == 5, "Excel add-in is reported installed with every file of the zip");
+                // A newer zip without one of the files: it is removed from the add-in folder; a file V-TOOL did not put there stays.
+                string fewer = Path.Combine(folder, "fewer.zip"), fewerFiles = Path.Combine(folder, "fewer");
+                MakeZip(fewer, "vtool.xlam", "VNFastSearch.dll", "Vietnamese.dic");
+                OfficeAddin.Extract(fewer, excel.MainFile, fewerFiles);
+                File.WriteAllText(Path.Combine(excel.InstallFolder(env), "notes.txt"), "user file");
+                excel.InstallFrom(env, fewerFiles);
+                Check(!File.Exists(Path.Combine(excel.InstallFolder(env), "VHighlight.dll")) && File.Exists(Path.Combine(excel.InstallFolder(env), "notes.txt"))
+                    && excel.InstalledFiles(env).Count == 3, "a file dropped from the add-in is cleaned up, other files are left alone");
+                File.Delete(Path.Combine(excel.InstallFolder(env), "notes.txt"));
+                excel.InstallFrom(env, files);
                 using (RegistryKey options = root.OpenSubKey(excelKey + @"\Options", true)) options.DeleteValue("OPEN2");
                 Check(excel.State(env) == AddinState.Disabled, "an unticked add-in is reported as not switched on");
                 using (RegistryKey options = root.OpenSubKey(excelKey + @"\Options", true)) options.SetValue("OPEN2", "\"" + installed + "\"");
@@ -211,21 +224,23 @@ namespace VietDang.VTool
                     Check(open.Count == 2 && open[1] == "\"C:\\Other\\third.xlam\"" && options.GetValue("OPEN2") == null, "Excel uninstall removes only V-TOOL from the add-in list");
                 }
                 using (RegistryKey trust = root.OpenSubKey(excelKey + @"\Security\Trusted Locations\LocationVTool"))
-                    Check(trust == null && !Directory.Exists(excel.InstallFolder(env)) && excel.State(env) == AddinState.Missing, "Excel uninstall removes the files and the trusted location");
+                    Check(trust == null && !Directory.Exists(excel.InstallFolder(env)) && excel.State(env) == AddinState.Missing && excel.InstalledFiles(env).Count == 0,
+                        "Excel uninstall removes every file it installed and the trusted location");
 
                 // Word: its default Startup folder, or the one chosen in Word's options.
                 string wordZip = Path.Combine(folder, "dotm.zip"), wordFiles = Path.Combine(folder, "dotm");
-                MakeZip(wordZip, "vtool.dotm", "Vietnamese.dic", "setup.cmd");
-                OfficeAddin.Extract(wordZip, word.Files, wordFiles);
+                MakeZip(wordZip, "dotm/vtool.dotm", "dotm/Vietnamese.dic", "dotm/WordExtra.dll", "dotm/setup.cmd");
+                Check(OfficeAddin.Extract(wordZip, word.MainFile, wordFiles).Count == 4, "every file of the Word zip is taken, setup.cmd included");
                 Check(word.InstallFolder(env) == Path.Combine(env.AppData, @"Microsoft\Word\STARTUP"), "Word uses its default Startup folder");
                 string custom = Path.Combine(folder, "My Startup");
                 using (RegistryKey options = root.CreateSubKey(@"Software\Microsoft\Office\16.0\Word\Options")) options.SetValue("STARTUP-PATH", custom + "\\");
                 Check(word.InstallFolder(env) == custom, "Word uses the Startup folder set in its options");
                 Check(word.State(env) == AddinState.Missing, "Word add-in is reported missing before install");
                 word.InstallFrom(env, wordFiles);
-                Check(word.State(env) == AddinState.Installed && File.Exists(Path.Combine(custom, "Vietnamese.dic")), "Word install copies both files into Startup");
+                Check(word.State(env) == AddinState.Installed && File.Exists(Path.Combine(custom, "Vietnamese.dic")) && File.Exists(Path.Combine(custom, "WordExtra.dll"))
+                    && File.Exists(Path.Combine(custom, "setup.cmd")) && word.InstalledFiles(env).Count == 4, "Word install copies every file into Startup");
                 word.Uninstall(env);
-                Check(word.State(env) == AddinState.Missing && !File.Exists(Path.Combine(custom, "Vietnamese.dic")), "Word uninstall removes both files");
+                Check(word.State(env) == AddinState.Missing && Directory.GetFiles(custom).Length == 0 && word.InstalledFiles(env).Count == 0, "Word uninstall removes every file it installed");
             }
             finally
             {
@@ -241,7 +256,10 @@ namespace VietDang.VTool
             using (FileStream stream = File.Create(path))
             using (ZipArchive archive = new ZipArchive(stream, ZipArchiveMode.Create))
                 foreach (string entry in entries)
+                {
+                    if (entry.EndsWith("/")) { archive.CreateEntry(entry); continue; } // a folder entry
                     using (StreamWriter writer = new StreamWriter(archive.CreateEntry(entry).Open())) writer.Write("content of " + entry);
+                }
         }
         // The updater pieces that do not need the network: tags, hashes, release parsing and the exe swap with rollback.
         private static void RunUpdateChecks()

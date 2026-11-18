@@ -40,7 +40,8 @@ namespace VietDang.VTool
         internal abstract string ProcessName { get; }    // WINWORD / EXCEL
         internal abstract string ZipUrl { get; }
         internal abstract string MainFile { get; }
-        internal abstract string[] Files { get; }
+        // What versions before 1.0.6 installed; they kept no list, so these are removed too when uninstalling.
+        internal abstract string[] KnownFiles { get; }
         internal abstract string InstallFolder(OfficeEnvironment env);
         internal abstract AddinState State(OfficeEnvironment env);
         internal abstract void InstallFrom(OfficeEnvironment env, string source);
@@ -78,7 +79,7 @@ namespace VietDang.VTool
                     input.CopyTo(output);
                 progress("Đang giải nén…");
                 string files = Path.Combine(work, "files");
-                Extract(zip, Files, files);
+                Extract(zip, MainFile, files);
                 if (IsRunning) throw new IOException(RunningMessage);
                 progress("Đang cài đặt…");
                 InstallFrom(env, files);
@@ -86,11 +87,12 @@ namespace VietDang.VTool
             finally { try { Directory.Delete(work, true); } catch (IOException) { } catch (UnauthorizedAccessException) { } }
         }
 
-        // Only the named files are taken out of the zip, wherever they sit inside it; everything else (setup.cmd…) is ignored.
-        internal static void Extract(string zip, string[] wanted, string folder)
+        // Every file in the zip is taken out (setup.cmd included), wherever it sits inside it, so a file added to the add-in
+        // later is installed without a new V-TOOL. The main add-in file must be there.
+        internal static List<string> Extract(string zip, string mainFile, string folder)
         {
             Directory.CreateDirectory(folder);
-            List<string> missing = new List<string>(wanted);
+            List<string> taken = new List<string>();
             try
             {
                 using (FileStream stream = File.OpenRead(zip))
@@ -98,21 +100,67 @@ namespace VietDang.VTool
                 {
                     foreach (ZipArchiveEntry entry in archive.Entries)
                     {
+                        // Only the file name is kept, so nothing can be written outside the folder.
                         string name = Path.GetFileName(entry.FullName.Replace('/', '\\'));
-                        string match = missing.Find(delegate(string file) { return string.Equals(file, name, StringComparison.OrdinalIgnoreCase); });
-                        if (match == null || entry.Length == 0) continue;
+                        // An empty name is a folder entry.
+                        if (name.Length == 0 || name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) continue;
+                        if (taken.Exists(delegate(string file) { return string.Equals(file, name, StringComparison.OrdinalIgnoreCase); })) continue;
                         using (Stream input = entry.Open())
-                        using (FileStream output = File.Create(Path.Combine(folder, match)))
+                        using (FileStream output = File.Create(Path.Combine(folder, name)))
                             input.CopyTo(output);
-                        missing.Remove(match);
+                        taken.Add(name);
                     }
                 }
             }
             catch (InvalidDataException) { throw new InvalidDataException("File tải về không phải file zip hợp lệ."); }
-            if (missing.Count > 0) throw new InvalidDataException("File zip trên GitHub thiếu: " + string.Join(", ", missing.ToArray()) + ".");
+            if (!taken.Exists(delegate(string file) { return string.Equals(file, mainFile, StringComparison.OrdinalIgnoreCase); }))
+                throw new InvalidDataException("File zip trên GitHub thiếu " + mainFile + ".");
+            return taken;
         }
 
-        protected static void CopyAll(string[] files, string source, string folder, string app)
+        // The files of the last install, kept per app under V-TOOL's settings, so an uninstall removes exactly them.
+        private const string ListKey = @"Software\VietDang\V-TOOL\Addins";
+        internal List<string> InstalledFiles(OfficeEnvironment env)
+        {
+            List<string> files = new List<string>();
+            using (RegistryKey key = Open(env.User, ListKey))
+            {
+                string[] saved = key == null ? null : key.GetValue(App) as string[];
+                if (saved != null) files.AddRange(saved);
+            }
+            return files;
+        }
+        private void SaveInstalledFiles(OfficeEnvironment env, List<string> files)
+        {
+            if (env.User == null) return;
+            using (RegistryKey key = env.User.CreateSubKey(ListKey))
+            {
+                if (files == null) key.DeleteValue(App, false);
+                else key.SetValue(App, files.ToArray(), RegistryValueKind.MultiString);
+            }
+        }
+        // Copies every file of the unpacked add-in, then removes files an earlier install put there that are no longer
+        // part of the add-in, and remembers the new list.
+        protected void InstallFiles(OfficeEnvironment env, string source, string folder)
+        {
+            List<string> files = new List<string>();
+            foreach (string path in Directory.GetFiles(source)) files.Add(Path.GetFileName(path));
+            List<string> old = InstalledFiles(env);
+            CopyAll(files, source, folder, App);
+            old.RemoveAll(delegate(string file) { return files.Exists(delegate(string current) { return string.Equals(current, file, StringComparison.OrdinalIgnoreCase); }); });
+            DeleteAll(old, folder, App);
+            SaveInstalledFiles(env, files);
+        }
+        protected void UninstallFiles(OfficeEnvironment env, string folder)
+        {
+            List<string> files = InstalledFiles(env);
+            foreach (string known in KnownFiles)
+                if (!files.Exists(delegate(string file) { return string.Equals(file, known, StringComparison.OrdinalIgnoreCase); })) files.Add(known);
+            DeleteAll(files, folder, App);
+            SaveInstalledFiles(env, null);
+        }
+
+        protected static void CopyAll(List<string> files, string source, string folder, string app)
         {
             Directory.CreateDirectory(folder);
             foreach (string file in files)
@@ -124,10 +172,12 @@ namespace VietDang.VTool
                 Unblock(target);
             }
         }
-        protected static void DeleteAll(string[] files, string folder, string app)
+        protected static void DeleteAll(List<string> files, string folder, string app)
         {
             foreach (string file in files)
             {
+                // A saved name never points outside the add-in folder.
+                if (file.Length == 0 || file.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) continue;
                 string path = Path.Combine(folder, file);
                 try { if (File.Exists(path)) File.Delete(path); }
                 catch (IOException) { throw new IOException("Không xóa được " + file + ". Hãy đóng hẳn " + app + " rồi thử lại."); }
@@ -155,7 +205,7 @@ namespace VietDang.VTool
         internal override string ProcessName { get { return "WINWORD"; } }
         internal override string ZipUrl { get { return "https://github.com/vietdang170/Addin-word/releases/latest/download/dotm.zip"; } }
         internal override string MainFile { get { return "vtool.dotm"; } }
-        internal override string[] Files { get { return new string[] { "vtool.dotm", "Vietnamese.dic" }; } }
+        internal override string[] KnownFiles { get { return new string[] { "vtool.dotm", "Vietnamese.dic" }; } }
 
         // The Startup folder set in Word (Options > Advanced > File Locations), else Word's default one.
         internal override string InstallFolder(OfficeEnvironment env)
@@ -179,12 +229,12 @@ namespace VietDang.VTool
         {
             return File.Exists(Path.Combine(InstallFolder(env), MainFile)) ? AddinState.Installed : AddinState.Missing;
         }
-        internal override void InstallFrom(OfficeEnvironment env, string source) { CopyAll(Files, source, InstallFolder(env), App); }
+        internal override void InstallFrom(OfficeEnvironment env, string source) { InstallFiles(env, source, InstallFolder(env)); }
         // Word lists the add-ins of its Startup folder by itself, so removing the files also removes it from Templates and Add-ins.
-        internal override void Uninstall(OfficeEnvironment env) { DeleteAll(Files, InstallFolder(env), App); }
+        internal override void Uninstall(OfficeEnvironment env) { UninstallFiles(env, InstallFolder(env)); }
     }
 
-    // Excel: the three files go into %APPDATA%\Microsoft\AddIns\vtool; an OPEN entry switches the add-in on and a
+    // Excel: the add-in files go into %APPDATA%\Microsoft\AddIns\vtool; an OPEN entry switches the add-in on and a
     // Trusted Location lets its macros run without a prompt.
     internal sealed class ExcelAddin : OfficeAddin
     {
@@ -195,7 +245,7 @@ namespace VietDang.VTool
         internal override string ProcessName { get { return "EXCEL"; } }
         internal override string ZipUrl { get { return "https://github.com/vietdang170/Addin-excel/releases/latest/download/xlam.zip"; } }
         internal override string MainFile { get { return "vtool.xlam"; } }
-        internal override string[] Files { get { return new string[] { "vtool.xlam", "VNFastSearch.dll", "Vietnamese.dic" }; } }
+        internal override string[] KnownFiles { get { return new string[] { "vtool.xlam", "VNFastSearch.dll", "Vietnamese.dic" }; } }
         internal override string InstallFolder(OfficeEnvironment env) { return Path.Combine(env.AppData, @"Microsoft\AddIns\vtool"); }
 
         private static string Base(string version) { return @"Software\Microsoft\Office\" + version + @"\Excel"; }
@@ -268,7 +318,7 @@ namespace VietDang.VTool
         internal override void InstallFrom(OfficeEnvironment env, string source)
         {
             string folder = InstallFolder(env);
-            CopyAll(Files, source, folder, App);
+            InstallFiles(env, source, folder);
             if (env.User == null) return;
             List<string> versions = InstalledVersions(env);
             if (versions.Count == 0) versions.Add("16.0");
@@ -313,7 +363,7 @@ namespace VietDang.VTool
         internal override void Uninstall(OfficeEnvironment env)
         {
             string folder = InstallFolder(env);
-            DeleteAll(Files, folder, App);
+            UninstallFiles(env, folder);
             try { if (Directory.Exists(folder) && Directory.GetFileSystemEntries(folder).Length == 0) Directory.Delete(folder); }
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
@@ -445,9 +495,9 @@ namespace VietDang.VTool
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             layout.Controls.Add(Kit.PageHeader(Glyph.Puzzle, "Add-in Office", ""), 0, 0);
-            _word = new AddinCard(OfficeAddin.Word, Glyph.Word, "Cài vtool.dotm và từ điển Vietnamese.dic vào Word.")
+            _word = new AddinCard(OfficeAddin.Word, Glyph.Word, "Cài vtool.dotm và các file đi kèm (từ điển…) vào Word.")
                 { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 10) };
-            _excel = new AddinCard(OfficeAddin.Excel, Glyph.Excel, "Cài vtool.xlam, VNFastSearch.dll, Vietnamese.dic vào Excel.")
+            _excel = new AddinCard(OfficeAddin.Excel, Glyph.Excel, "Cài vtool.xlam và các file đi kèm (dll, từ điển…) vào Excel.")
                 { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 10) };
             layout.Controls.Add(_word, 0, 1);
             layout.Controls.Add(_excel, 0, 2);
